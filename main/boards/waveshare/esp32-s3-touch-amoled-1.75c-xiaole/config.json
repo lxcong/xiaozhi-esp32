@@ -1,0 +1,20 @@
+{
+    "manufacturer": "waveshare",
+    "type": "esp32-s3-touch-amoled-1.75c-xiaole",
+    "target": "esp32s3",
+    "builds": [
+        {
+            "name": "esp32-s3-touch-amoled-1.75c-xiaole",
+            "sdkconfig_append": [
+                "CONFIG_BOARD_TYPE_WAVESHARE_ESP32_S3_TOUCH_AMOLED_1_75C_XIAOLE=y",
+                "CONFIG_USE_WECHAT_MESSAGE_STYLE=n",
+                "CONFIG_USE_MULTILINE_CHAT_MESSAGE=n",
+                "CONFIG_USE_DEVICE_AEC=y",
+                "CONFIG_ESPTOOLPY_FLASHSIZE_32MB=y",
+                "CONFIG_PARTITION_TABLE_CUSTOM_FILENAME=\"partitions/v2/32m_waveshare_amoled_1.75c.csv\"",
+                "CONFIG_IDF_EXPERIMENTAL_FEATURES=y",
+                "CONFIG_BOOTLOADER_CACHE_32BIT_ADDR_QUAD_FLASH=y"
+            ]
+        }
+    ]
+}

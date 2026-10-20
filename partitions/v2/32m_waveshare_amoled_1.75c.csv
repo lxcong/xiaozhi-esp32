@@ -1,0 +1,13 @@
+# ESP-IDF Partition Table
+# Matches the Waveshare ESP32-S3-Touch-AMOLED-1.75C factory layout so the Xiaole app
+# can be written into ota_1 next to the vendor launcher (factory) and vendor xiaozhi (ota_0).
+# Name,     Type, SubType, Offset,    Size,  Flags
+nvsfactory, data, nvs,     0x9000,    200K,
+nvs,        data, nvs,     0x3b000,   840K,
+otadata,    data, ota,     0x10d000,  0x2000,
+phy_init,   data, phy,     0x10f000,  0x1000,
+factory,    app,  factory, 0x110000,  9M,
+ota_0,      app,  ota_0,   0xa10000,  4032K,
+ota_1,      app,  ota_1,   0xe00000,  4032K,
+assets,     data, spiffs,  0x11f0000, 9M,
+storage,    data, spiffs,  0x1af0000, 5M,
