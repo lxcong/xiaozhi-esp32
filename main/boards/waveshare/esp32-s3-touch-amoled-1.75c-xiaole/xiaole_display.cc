@@ -110,11 +110,13 @@ void XiaoleDisplay::Animate() {
         expression_.SetVoice(voice);
         last_voice_ = voice;
     }
-    animator_.Tick(ms, sleeping_);
     xiaole::Scene scene;
-    scene.pose = !sleeping_ && imu_ ? imu_->Snapshot(ms) : xiaole::Pose{};
     scene.mix = expression_.Step(ms);
-    scene.eyes_open = animator_.eyes_open();
+    scene.idle_ms = expression_.IdleMs(ms);
+    xiaole::ApplyAnimatorPreset(animator_, scene.mix.to, voice, scene.idle_ms);
+    animator_.Tick(ms, sleeping_);
+    scene.pose = !sleeping_ && imu_ ? imu_->Snapshot(ms) : xiaole::Pose{};
+    scene.eye_open = animator_.eye_open();
     scene.gaze_x = animator_.gaze_x();
     scene.gaze_y = animator_.gaze_y();
     scene.voice = voice;

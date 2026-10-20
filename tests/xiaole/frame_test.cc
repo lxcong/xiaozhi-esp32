@@ -64,7 +64,7 @@ int main() {
 
     // Subtitle region: two lines of the 46 px device font land on the 36 px pitch,
     // fit inside the 72 px window and never scroll; a third line scrolls one pitch.
-    static_assert(kSubtitleX + kSubtitleWidth == 383 && kSubtitleY + kSubtitleHeight == 398);
+    static_assert(kSubtitleX + kSubtitleWidth == (kLayoutLarge ? 363 : 383) && kSubtitleY + kSubtitleHeight == (kLayoutLarge ? 402 : 398));
     static_assert(kSubtitleLinePitch * kSubtitleLines == kSubtitleHeight);
     constexpr int kFontLineHeight = 46;  // font_noto_sans_common_30_4 as loaded from assets
     static_assert(SubtitleLineSpace(kFontLineHeight) == -10);
@@ -72,13 +72,13 @@ int main() {
     for (int lines = 1; lines <= 6; ++lines)
         assert(SubtitleLineCount(height(lines), kFontLineHeight) == lines);
     assert(SubtitleLineCount(0, kFontLineHeight) == 1);
-    assert(SubtitleOverflow(1) == 0 && SubtitleOverflow(2) == 0);
-    assert(SubtitleOverflow(3) == kSubtitleLinePitch && SubtitleOverflow(5) == 3 * kSubtitleLinePitch);
+    assert(SubtitleOverflow(1) == 0 && SubtitleOverflow(kSubtitleLines) == 0);
+    assert(SubtitleOverflow(kSubtitleLines + 1) == kSubtitleLinePitch && SubtitleOverflow(kSubtitleLines + 3) == 3 * kSubtitleLinePitch);
     // A smaller fallback font (builtin basic 30 px, line height 32) is handled the same way.
     assert(SubtitleLineCount(32 * 3 + 2 * SubtitleLineSpace(32), 32) == 3);
     // Five lines: three line steps, each hold + slide; offsets rest on line boundaries.
     {
-        const int overflow = SubtitleOverflow(5);
+        const int overflow = SubtitleOverflow(kSubtitleLines + 3);
         const int step = kSubtitleHoldMs + kSubtitleSlideMs;
         assert(SubtitleScrollDurationMs(overflow) == 3 * step);
         assert(SubtitleScrollOffset(overflow, 0) == 0);
@@ -183,19 +183,29 @@ int main() {
         Frame f = ComposeFrame(scene, 0);
         assert(f.mood == 1 && f.mood_from == kNeutralMood && f.blend == 0.25f && !f.blink);
         scene.mix = {};
-        scene.eyes_open = false;
+        scene.eye_open = 0.f;
         f = ComposeFrame(scene, 0);
         assert(f.blink && f.mood == kNeutralMood);
-        scene.eyes_open = true;
+        scene.eye_open = 1.f;
         scene.gaze_x = 1; scene.gaze_y = -1;
         f = ComposeFrame(scene, 0);
-        assert(f.box_x == 1 && f.box_y == kBoxOffsetY - 1);
+        assert(f.box_x == 0 && f.box_y == kBoxOffsetY);           // the fidget no longer moves the body
+        assert(f.pupil_x == 1 && f.pupil_y == -1);                 // it moves the pupils
+        scene.pose.x = 20.f; scene.pose.y = -10.f;                 // a tilt wins over the fidget
+        f = ComposeFrame(scene, 0);
+        assert(f.box_x == 20 && f.pupil_x == 2 && f.pupil_y == -1);  // 20/8 -> 2 (max), -10/6 -> -1 (max)
+        scene.pose.x = 9.f; scene.pose.y = 0.f;
+        assert(ComposeFrame(scene, 0).pupil_x == 1);
+        scene.pose.x = -3.f; scene.pose.y = 2.f;                   // below one pupil step: fidget shows
+        f = ComposeFrame(scene, 0);
+        assert(f.box_x == -3 && f.pupil_x == 1 && f.pupil_y == -1);
+        scene.pose = {};
         scene.gaze_x = scene.gaze_y = 0;
         scene.voice = VoiceState::kListening;
         assert(ComposeFrame(scene, 0).box_y == kBoxOffsetY - kListenLift);
         scene.voice = VoiceState::kThinking;
         f = ComposeFrame(scene, 0);
-        assert(f.box_x == kThinkLookX && f.box_y == kBoxOffsetY - kThinkLookY);
+        assert(f.box_x == 0 && f.pupil_x == kThinkLookX && f.pupil_y == kThinkLookY);
         scene.voice = VoiceState::kSpeaking;
         scene.loudness = 0.75f;
         assert(ComposeFrame(scene, 0).squash == 0.75f);
@@ -304,6 +314,185 @@ int main() {
         assert(pixels[44 * kSpriteWidth + 4 + 31] == 0xffedaaa7);  // pink tongue
     }
 
+    {
+        // Pupils: neutral eyes move with pupil_x/y and keep the highlight; happy (smile eyes)
+        // never changes; winking moves only the left eye; nothing moves mid-transition.
+        Frame look;
+        look.pupil_x = 1; look.pupil_y = 0;
+        RenderFrame(look, pixels);
+        static uint32_t plain[kSpriteWidth * kSpriteHeight];
+        RenderFrame(Frame{}, plain);
+        assert(pixels[33 * kSpriteWidth + 4 + 24] == 0xffffffff);  // highlight moved right by one
+        assert(pixels[35 * kSpriteWidth + 4 + 26] == 0xff343f35);  // pupil column x 24..26
+        assert(pixels[35 * kSpriteWidth + 4 + 23] == 0xfffff0d5);  // old pupil column erased
+        assert(plain[35 * kSpriteWidth + 4 + 23] == 0xff343f35);
+        assert(pixels[35 * kSpriteWidth + 4 + 42] == 0xff343f35);  // right eye moved too
+        for (int y = 0; y < kSpriteHeight; ++y)
+            for (int x = 0; x < kSpriteWidth; ++x)
+                if (y < kEyeTop || y >= kEyeTop + kEyeRows)
+                    assert(pixels[y * kSpriteWidth + x] == plain[y * kSpriteWidth + x]);
+        Frame far;
+        far.pupil_x = 2;  // pupil reaches the added column at x0+6 = 28 (left eye)
+        RenderFrame(far, pixels);
+        assert(pixels[35 * kSpriteWidth + 4 + 27] == 0xff343f35 && pixels[35 * kSpriteWidth + 4 + 25] == 0xff343f35);
+        assert(pixels[35 * kSpriteWidth + 4 + 22] == 0xfffff0d5);
+        assert(pixels[39 * kSpriteWidth + 4 + 21] == plain[39 * kSpriteWidth + 4 + 21]);  // blush row untouched
+        far.pupil_x = -2;
+        RenderFrame(far, pixels);
+        assert(pixels[35 * kSpriteWidth + 4 + 21] == 0xff343f35);  // reaches the added column at x0-1
+        Frame happy;
+        happy.mood = 1; happy.mood_from = 1; happy.pupil_x = 1;
+        RenderFrame(happy, pixels);
+        Frame happy_still;
+        happy_still.mood = 1; happy_still.mood_from = 1;
+        RenderFrame(happy_still, plain);
+        assert(std::memcmp(pixels, plain, sizeof(uint32_t) * kSpriteWidth * kSpriteHeight) == 0);
+        Frame wink;
+        wink.mood = kWinkingMood; wink.mood_from = kWinkingMood; wink.pupil_x = -1;
+        RenderFrame(wink, pixels);
+        Frame wink_still = wink;
+        wink_still.pupil_x = 0;
+        RenderFrame(wink_still, plain);
+        assert(pixels[35 * kSpriteWidth + 4 + 22] == 0xff343f35 && plain[35 * kSpriteWidth + 4 + 22] != 0xff343f35);
+        for (int y = kEyeTop; y < kEyeTop + kEyeRows; ++y)
+            for (int x = kRightEyeX; x < kRightEyeX + 6; ++x)
+                assert(pixels[y * kSpriteWidth + 4 + x] == plain[y * kSpriteWidth + 4 + x]);
+        Frame mid;
+        mid.mood = 4; mid.mood_from = 0; mid.blend = 0.5f; mid.pupil_x = 1;
+        Frame mid_still = mid;
+        mid_still.pupil_x = 0;
+        RenderFrame(mid, pixels);
+        RenderFrame(mid_still, plain);
+        assert(std::memcmp(pixels, plain, sizeof(uint32_t) * kSpriteWidth * kSpriteHeight) == 0);
+        assert(EyePupils(0) == 3 && EyePupils(1) == 0 && EyePupils(kWinkingMood) == 1 && EyePupils(kSleepyMood) == 0);
+        static_assert(kSpriteScale == (kLayoutLarge ? 5 : 4), "sprite scale per layout");
+    }
+
+    {
+        // Eye expression: lids by attention and boredom, pupil size, brows, squint, glance habits.
+        Scene scene;
+        scene.voice = VoiceState::kListening;
+        scene.pose.x = 20.f;  // tilted, but a listener looks at the person
+        Frame f = ComposeFrame(scene, 0);
+        assert(f.pupil_size == 2 && f.pupil_x == 0 && f.pupil_y == 0 && f.eye_open == 1.f);
+        scene.voice = VoiceState::kIdle;
+        scene.pose = {};
+        scene.idle_ms = kBoredAfterMs;
+        assert(std::fabs(ComposeFrame(scene, 0).eye_open - 0.67f) < 1e-5f);
+        scene.idle_ms = kDrowsyAfterMs;
+        assert(std::fabs(ComposeFrame(scene, 0).eye_open - 0.34f) < 1e-5f);
+        scene.eye_open = 0.f;  // a blink still closes fully while bored
+        assert(ComposeFrame(scene, 0).eye_open == 0.f && ComposeFrame(scene, 0).blink);
+        scene.eye_open = 1.f;
+        scene.idle_ms = 0;
+        scene.mix = {kSadMood, kSadMood, 0.f, kSadMood, 1.f};
+        f = ComposeFrame(scene, 0);
+        assert(f.pupil_size == 0 && f.brows == 2 && !f.highlight);
+        scene.mix = {kAngryMood, kAngryMood, 0.f, kAngryMood, 1.f};
+        f = ComposeFrame(scene, 0);
+        assert(f.brows == 1 && f.pupil_size == 1 && f.highlight);
+        scene.mix = {kConfusedMood, kConfusedMood, 0.f, kConfusedMood, 1.f};
+        f = ComposeFrame(scene, 0);
+        assert(f.brows == 3 && f.right_lid_extra == 3);
+        scene.mix = {};
+        scene.voice = VoiceState::kThinking;
+        assert(ComposeFrame(scene, 0).pupil_x == kThinkLookX && ComposeFrame(scene, kThinkGlanceMs).pupil_x == -kThinkLookX);
+        assert(ComposeFrame(scene, 0).pupil_y == kThinkLookY);
+        // happy keeps its sprite eyes: no procedural parameters apply
+        scene.voice = VoiceState::kListening;
+        scene.mix = {1, 1, 0.f, 1, 1.f};
+        assert(ComposeFrame(scene, 0).pupil_size == 1 && EyePupils(1) == 0);
+    }
+    {
+        // Eye rendering: brows, lids, pupil sizes, closed line on every pupil mood.
+        static uint32_t plain[kSpriteWidth * kSpriteHeight];
+        Frame base;
+        RenderFrame(base, plain);
+        Frame angry;
+        angry.mood = angry.mood_from = angry.mood_hold = kAngryMood;
+        angry.brows = 1;
+        RenderFrame(angry, pixels);
+        // angry: left brow outer end (x 22..24) on row 30, inner end (x 25..27) on row 31
+        assert(pixels[30 * kSpriteWidth + 4 + 22] == 0xff343f35 && pixels[31 * kSpriteWidth + 4 + 22] == 0xfffff0d5);
+        assert(pixels[31 * kSpriteWidth + 4 + 27] == 0xff343f35 && pixels[30 * kSpriteWidth + 4 + 27] == 0xfffff0d5);
+        // right brow mirrors: inner end (x 38..40) on row 31, outer (41..43) on row 30
+        assert(pixels[31 * kSpriteWidth + 4 + 38] == 0xff343f35 && pixels[30 * kSpriteWidth + 4 + 43] == 0xff343f35);
+        Frame sad;
+        sad.mood = sad.mood_from = sad.mood_hold = kSadMood;
+        sad.brows = 2; sad.pupil_size = 0; sad.highlight = false;
+        RenderFrame(sad, pixels);
+        assert(pixels[30 * kSpriteWidth + 4 + 27] == 0xff343f35 && pixels[31 * kSpriteWidth + 4 + 22] == 0xff343f35);
+        int dark = 0;
+        for (int y = kEyeTop; y < kEyeTop + kEyeRows; ++y)
+            for (int x = kLeftEyeX - 1; x < kLeftEyeX + 7; ++x)
+                dark += pixels[y * kSpriteWidth + 4 + x] == 0xff343f35;
+        assert(dark == 8);  // small pupil: 2x4, no highlight
+        Frame half;
+        half.eye_open = 0.5f;
+        RenderFrame(half, pixels);
+        assert(pixels[35 * kSpriteWidth + 4 + 22] == 0xff343f35);  // lid edge line across the eye
+        assert(pixels[34 * kSpriteWidth + 4 + 24] == 0xfffff0d5);  // pupil rows above the lid hidden
+        assert(pixels[37 * kSpriteWidth + 4 + 24] == 0xff343f35);  // pupil visible below
+        Frame big;
+        big.pupil_size = 2;
+        RenderFrame(big, pixels);
+        dark = 0;
+        int white = 0;
+        for (int y = kEyeTop; y < kEyeTop + kEyeRows; ++y)
+            for (int x = kLeftEyeX - 1; x < kLeftEyeX + 7; ++x) {
+                dark += pixels[y * kSpriteWidth + 4 + x] == 0xff343f35;
+                white += pixels[y * kSpriteWidth + 4 + x] == 0xffffffff;
+            }
+        assert(dark + white == 24 && white == 4);  // 4x6 pupil with a 2x2 highlight
+        Frame closed_angry = angry;
+        closed_angry.eye_open = 0.f;
+        RenderFrame(closed_angry, pixels);
+        assert(pixels[36 * kSpriteWidth + 4 + 24] == 0xff343f35 && pixels[34 * kSpriteWidth + 4 + 24] == 0xfffff0d5);
+        Frame squint;
+        squint.mood = squint.mood_from = squint.mood_hold = kConfusedMood;
+        squint.brows = 3; squint.right_lid_extra = 3;
+        RenderFrame(squint, pixels);
+        assert(pixels[30 * kSpriteWidth + 4 + 24] == 0xff343f35 && pixels[30 * kSpriteWidth + 4 + 40] != 0xff343f35);  // left brow raised only
+        assert(pixels[34 * kSpriteWidth + 4 + 40] == 0xfffff0d5 && pixels[34 * kSpriteWidth + 4 + 24] == 0xff343f35);  // right eye half shut
+        (void)plain;
+    }
+    {
+        // Blink styles: slow blinks pass through half-closed frames; double blinks close twice.
+        FaceAnimator slow(7);
+        slow.SetBlinkStyle(BlinkStyle::kSlow);
+        bool saw_half = false;
+        int closes = 0; float prev = 1.f;
+        for (uint64_t ms = 0; ms < 30000; ms += 10) {
+            slow.Tick(ms, false);
+            if (slow.eye_open() == 0.5f) saw_half = true;
+            if (slow.eye_open() == 0.f && prev > 0.f) ++closes;
+            prev = slow.eye_open();
+        }
+        assert(saw_half && closes >= 4);
+        FaceAnimator dbl(7);
+        dbl.SetBlinkStyle(BlinkStyle::kDouble);
+        int pairs = 0; uint64_t last_close = 0; prev = 1.f;
+        for (uint64_t ms = 0; ms < 30000; ms += 10) {
+            dbl.Tick(ms, false);
+            if (dbl.eye_open() == 0.f && prev > 0.f) {
+                if (ms - last_close < 400) ++pairs;
+                last_close = ms;
+            }
+            prev = dbl.eye_open();
+        }
+        assert(pairs >= 4);
+        ExpressionController c;
+        c.Step(1000);
+        assert(c.IdleMs(31000) == 30000);
+        c.SetVoice(VoiceState::kListening);
+        c.Step(40000);
+        assert(c.IdleMs(41000) == 1000);
+        FaceAnimator a;
+        ApplyAnimatorPreset(a, kNeutralMood, VoiceState::kIdle, kBoredAfterMs);
+        assert(a.params.gaze_amplitude == 2);
+    }
+
     std::cout << "frame mood selection, blink window, ear rows, box offset, subtitle geometry, "
-                 "expression engine, animator, blending, squash, loudness envelope, mouth overlay: PASS\n";
+                 "expression engine, animator, blending, squash, loudness envelope, mouth overlay, pupils, "
+                 "eye expression, blink styles: PASS\n";
 }

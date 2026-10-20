@@ -2,6 +2,7 @@
 #include <cmath>
 #include <iostream>
 #include <limits>
+#include "xiaole_frame.h"
 #include "xiaole_motion.h"
 
 int main() {
@@ -51,8 +52,8 @@ int main() {
         assert(std::fabs(pose.x) <= 24 && std::fabs(pose.y) <= 12 && std::fabs(pose.ears) <= 2);
     }
     // All subtitle corners must fit inside the physical circular mask with 10 px margin.
-    for (int x : {83, 383})
-        for (int y : {326, 398}) {
+    for (int x : {xiaole::kSubtitleX, xiaole::kSubtitleX + xiaole::kSubtitleWidth})
+        for (int y : {xiaole::kSubtitleY, xiaole::kSubtitleY + xiaole::kSubtitleHeight}) {
             assert(std::hypot(x - 233, y - 233) < 223);
         }
     std::cout << "motion calibration, tilt, cooldown, invalid samples, bounds, round-screen "

@@ -103,25 +103,28 @@ inline void LayoutSubtitle(lv_obj_t* bar, lv_obj_t* label) {
 // Every corner of these rectangles stays within a radius of 223 pixels.
 // Keep 10 px clearance from the physical 233 px round display edge.
 inline void ApplyLayout(const ScreenWidgets& w) {
+    // Icons at the ends of the top bar, status text in its middle: one line, so the
+    // rabbit gets the whole band down to the subtitle. The large layout's line sits at
+    // y 24 where the circle is 206 px wide, hence the narrower bar.
     if (w.top_bar) {
-        lv_obj_set_size(w.top_bar, 240, 38);
-        lv_obj_align(w.top_bar, LV_ALIGN_TOP_MID, 0, 46);
+        lv_obj_set_size(w.top_bar, kLayoutLarge ? 200 : 240, kTopLineH);
+        lv_obj_align(w.top_bar, LV_ALIGN_TOP_MID, 0, kTopLineY);
         lv_obj_set_style_pad_all(w.top_bar, 0, 0);
     }
     if (w.status_bar) {
-        lv_obj_set_size(w.status_bar, 290, 40);
-        lv_obj_align(w.status_bar, LV_ALIGN_TOP_MID, 0, 82);
+        lv_obj_set_size(w.status_bar, 120, kTopLineH);
+        lv_obj_align(w.status_bar, LV_ALIGN_TOP_MID, 0, kTopLineY);
         lv_obj_set_style_pad_all(w.status_bar, 0, 0);
     }
     if (w.status_label)
-        lv_obj_set_width(w.status_label, 280);
+        lv_obj_set_width(w.status_label, 120);
     if (w.notification_label)
-        lv_obj_set_width(w.notification_label, 280);
+        lv_obj_set_width(w.notification_label, 120);
     if (w.bottom_bar && w.chat_message_label)
         LayoutSubtitle(w.bottom_bar, w.chat_message_label);
     if (w.low_battery_popup) {
-        lv_obj_set_size(w.low_battery_popup, 300, 72);
-        lv_obj_align(w.low_battery_popup, LV_ALIGN_TOP_MID, 0, 326);
+        lv_obj_set_size(w.low_battery_popup, kSubtitleWidth, kSubtitleHeight);
+        lv_obj_align(w.low_battery_popup, LV_ALIGN_TOP_MID, 0, kSubtitleY);
     }
     if (w.low_battery_label) {
         lv_obj_set_width(w.low_battery_label, 280);
