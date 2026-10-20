@@ -13,7 +13,8 @@
                 "CONFIG_ESPTOOLPY_FLASHSIZE_32MB=y",
                 "CONFIG_PARTITION_TABLE_CUSTOM_FILENAME=\"partitions/v2/32m_waveshare_amoled_1.75c.csv\"",
                 "CONFIG_IDF_EXPERIMENTAL_FEATURES=y",
-                "CONFIG_BOOTLOADER_CACHE_32BIT_ADDR_QUAD_FLASH=y"
+                "CONFIG_BOOTLOADER_CACHE_32BIT_ADDR_QUAD_FLASH=y",
+                "CONFIG_OTA_URL=\"http://192.168.10.58:8766/xiaozhi/ota/\""
             ]
         }
     ]

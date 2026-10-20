@@ -109,8 +109,16 @@ factory 的情况，原因没能从设备上取证（IDF 6.0 bootloader 源码�
 assets 分区与 2.1.0 共用：2.1.0 读到小乐资源会崩溃（它没有 fst 容错），回退前先写回备份里的资源。不要执行 `idf.py flash`：它会覆盖 bootloader、
 分区表（虽然相同）并把 app 写进 factory 分区，覆盖微雪启动器。
 
-注意：省电定时器开机即启用，空闲 300 秒会让 AXP2101 关机（与上游 1.75 板一致），
-此时 USB 串口消失，需按电源键或重新插拔 USB。
+省电定时器空闲 60 秒进入省电显示，不做空闲自动关机：AXP2101 的电流方向位在 USB 供电下也会
+报告“放电”，按它判断仍会关机（真机验证过），所以关机只靠电源键长按 4 秒。上游 1.75 板空闲 5 分钟关机。
+
+## 服务器：本机 groki 网关
+
+`config.json` 把默认 OTA 地址（`CONFIG_OTA_URL`）设成本机网关 `http://192.168.10.58:8766/xiaozhi/ota/`
+（工作区 `integrations/groki-gateway`，分支 xiaole-ota-endpoint）。网关在 OTA 响应里给出
+`ws://192.168.10.58:8765/` 和令牌，固件因此改走网关的小智协议服务，由网关接 Gemini Live 或
+Grok Bot 登录态语音。NVS 里的 `wifi/ota_url`（配网页面“自定义 OTA 地址”）非空时优先于这个默认值，
+填回 `https://api.tenclass.net/xiaozhi/ota/` 即可回到小智官方服务器。Mac 的局域网 IP 变了要同步改。
 
 ## 硬件依据
 

@@ -211,9 +211,14 @@ private:
     CustomBacklight* backlight_;
 
     PowerSaveTimer* power_save_timer_;
+    bool discharging_ = false;  // last PMIC reading; gates the idle power-off
 
     void InitializePowerSaveTimer() {
-        power_save_timer_ = new PowerSaveTimer(-1, 60, 300);
+        // No idle power-off: a desk pet on USB must stay on, and the AXP2101
+        // current-direction bits proved unreliable for telling USB from battery
+        // (the device switched itself off on USB power). Sleep after 60 s idle
+        // only; power off with the power key (4 s hold, see the PMIC setup).
+        power_save_timer_ = new PowerSaveTimer(-1, 60, -1);
         power_save_timer_->OnEnterSleepMode([this]() {
             GetDisplay()->SetPowerSaveMode(true);
             GetBacklight()->SetBrightness(20);
@@ -222,7 +227,7 @@ private:
             GetDisplay()->SetPowerSaveMode(false);
             GetBacklight()->RestoreBrightness();
         });
-        power_save_timer_->OnShutdownRequest([this]() { pmic_->PowerOff(); });
+        power_save_timer_->OnShutdownRequest([this]() { pmic_->PowerOff(); });  // never fires: shutdown disabled
         power_save_timer_->SetEnabled(true);
     }
 
@@ -414,6 +419,7 @@ public:
             return false;  // caller keeps the previous reading
         charging = direction == 1;
         discharging = direction == 2;
+        discharging_ = discharging;
         if (discharging != last_discharging) {
             power_save_timer_->SetEnabled(discharging);
             last_discharging = discharging;
