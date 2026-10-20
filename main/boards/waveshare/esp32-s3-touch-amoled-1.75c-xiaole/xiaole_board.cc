@@ -12,6 +12,7 @@
 #include "mcp_server.h"
 #include "power_save_timer.h"
 
+#include <cmath>
 #include <driver/i2c_master.h>
 #include <driver/spi_master.h>
 #include <freertos/FreeRTOS.h>
@@ -19,6 +20,7 @@
 #include <atomic>
 #include <esp_lcd_panel_vendor.h>
 #include <esp_log.h>
+#include <esp_timer.h>
 #include "esp_io_expander_tca9554.h"
 #include "settings.h"
 
@@ -198,6 +200,26 @@ static void XiaoleTouchRead(lv_indev_t* indev, lv_indev_data_t* data) {
     data->state = touch->last_state;
     data->point = touch->last_point;
 }
+
+// BoxAudioCodec with a tap on the playback path: each PCM chunk's RMS in dBFS goes
+// to the display for lip sync. The math is a few hundred multiply-adds per 60 ms.
+class XiaoleAudioCodec : public BoxAudioCodec {
+public:
+    using BoxAudioCodec::BoxAudioCodec;
+    std::function<void(float dbfs, uint64_t at_ms)> on_level;
+
+    void OutputData(std::vector<int16_t>& data) override {
+        if (on_level && !data.empty()) {
+            double sum = 0;
+            for (int16_t s : data)
+                sum += static_cast<double>(s) * s;
+            const double rms = std::sqrt(sum / data.size()) / 32768.0;
+            const float dbfs = rms > 1e-6 ? static_cast<float>(20.0 * std::log10(rms)) : -120.f;
+            on_level(dbfs, esp_timer_get_time() / 1000);
+        }
+        BoxAudioCodec::OutputData(data);
+    }
+};
 
 class XiaoleWaveshare175C : public WifiBoard {
 private:
@@ -395,11 +417,16 @@ public:
     }
 
     virtual AudioCodec* GetAudioCodec() override {
-        static BoxAudioCodec audio_codec(
+        static XiaoleAudioCodec audio_codec(
             i2c_bus_, AUDIO_INPUT_SAMPLE_RATE, AUDIO_OUTPUT_SAMPLE_RATE, AUDIO_I2S_GPIO_MCLK,
             AUDIO_I2S_GPIO_BCLK, AUDIO_I2S_GPIO_WS, AUDIO_I2S_GPIO_DOUT, AUDIO_I2S_GPIO_DIN,
             AUDIO_CODEC_PA_PIN, AUDIO_CODEC_ES8311_ADDR, AUDIO_CODEC_ES7210_ADDR,
             AUDIO_INPUT_REFERENCE);
+        if (!audio_codec.on_level && display_) {
+            audio_codec.on_level = [this](float dbfs, uint64_t at_ms) {
+                display_->SetPlaybackLevelDb(dbfs, at_ms);
+            };
+        }
         return &audio_codec;
     }
 

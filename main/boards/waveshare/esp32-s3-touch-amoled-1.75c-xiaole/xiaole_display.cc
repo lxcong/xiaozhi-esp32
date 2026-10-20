@@ -118,7 +118,19 @@ void XiaoleDisplay::Animate() {
     scene.gaze_x = animator_.gaze_x();
     scene.gaze_y = animator_.gaze_y();
     scene.voice = voice;
-    scene.loudness = loudness_.load();
+    // Lip sync: the codec reports each 60 ms playback chunk's loudness; a chunk older
+    // than 250 ms means playback stopped, so the mouth closes instead of sticking.
+    float loudness = loudness_.load();
+    if (loudness < 0.f) {
+        if (voice == xiaole::VoiceState::kSpeaking) {
+            const bool fresh = ms - playback_at_ms_.load() <= 250;
+            loudness = envelope_.Update(fresh ? playback_dbfs_.load() : -100.f);
+        } else {
+            envelope_.Reset();
+            loudness = 0.f;
+        }
+    }
+    scene.loudness = loudness;
     scene.sleeping = sleeping_;
     const auto frame = xiaole::ComposeFrame(scene, ms);
     xiaole::RenderFrame(frame, pixels_.data());

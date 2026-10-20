@@ -244,6 +244,66 @@ int main() {
             assert(pixels[(kFrameSize - 1) * kSpriteWidth + 4 + x] == kPalette[kFrames[0][(kFrameSize - 1) * kFrameSize + x]]);
     }
 
+    {
+        // Loudness envelope: silence stays closed; a sustained tone opens then settles toward
+        // half as the baseline catches up; attack is faster than release; reset clears.
+        LoudnessEnvelope env;
+        for (int i = 0; i < 10; ++i)
+            assert(env.Update(-80.f) == 0.f);
+        float first = env.Update(-20.f);
+        assert(first > 0.2f && first <= 0.6f);
+        float peak = first;
+        for (int i = 0; i < 5; ++i)
+            peak = std::max(peak, env.Update(-20.f));
+        assert(peak >= first);
+        for (int i = 0; i < 200; ++i)
+            env.Update(-20.f);
+        const float settled = env.level();
+        assert(settled > 0.3f && settled < 0.7f);  // steady sound sits around half open
+        float louder = env.Update(-12.f);
+        assert(louder > settled);  // a syllable above the running average opens wider
+        float after_one_quiet = env.Update(-80.f);
+        assert(after_one_quiet < louder && after_one_quiet > 0.f);  // release is gradual
+        for (int i = 0; i < 30; ++i)
+            env.Update(-80.f);
+        assert(env.level() == 0.f);
+        env.Update(-20.f);
+        env.Reset();
+        assert(env.level() == 0.f);
+        assert(MouthLevel(0.f) == 0 && MouthLevel(0.19f) == 0 && MouthLevel(0.2f) == 1 && MouthLevel(0.54f) == 1 && MouthLevel(0.55f) == 2);
+    }
+    {
+        // Mouth overlay: only while speaking, only inside the 10x8 mouth box, index 0 leaves the face.
+        Scene scene;
+        scene.voice = VoiceState::kSpeaking;
+        scene.loudness = 0.9f;
+        Frame f = ComposeFrame(scene, 0);
+        assert(f.mouth == 2 && f.squash == 0.9f);
+        scene.loudness = 0.3f;
+        assert(ComposeFrame(scene, 0).mouth == 1);
+        scene.voice = VoiceState::kListening;
+        assert(ComposeFrame(scene, 0).mouth == 0);
+        f = Frame{};
+        f.mouth = 2;  // overlay alone, no squash, so rows line up with the plain render
+        RenderFrame(f, pixels);
+        static uint32_t plain[kSpriteWidth * kSpriteHeight];
+        Frame base;
+        RenderFrame(base, plain);
+        int changed = 0;
+        for (int y = 0; y < kSpriteHeight; ++y)
+            for (int x = 0; x < kSpriteWidth; ++x) {
+                const bool inside = y >= kMouthY && y < kMouthY + kMouthH && x - 4 >= kMouthX && x - 4 < kMouthX + kMouthW;
+                const uint32_t a = pixels[y * kSpriteWidth + x], b = plain[y * kSpriteWidth + x];
+                if (!inside)
+                    assert(a == b);
+                else if (a != b)
+                    ++changed;
+            }
+        assert(changed > 10);  // the open mouth is visibly different from the neutral mouth
+        assert(pixels[41 * kSpriteWidth + 4 + 30] == 0xff343f35);  // dark mouth interior
+        assert(pixels[44 * kSpriteWidth + 4 + 31] == 0xffedaaa7);  // pink tongue
+    }
+
     std::cout << "frame mood selection, blink window, ear rows, box offset, subtitle geometry, "
-                 "expression engine, animator, blending, squash: PASS\n";
+                 "expression engine, animator, blending, squash, loudness envelope, mouth overlay: PASS\n";
 }

@@ -102,6 +102,7 @@ struct Frame {
     int ear_shift = 0;
     bool blink = false;
     float squash = 0.f;             // 0..1 vertical squash while speaking (bottom anchored)
+    int mouth = 0;                  // 0 = the mood's own mouth, 1 = half open, 2 = open (lip sync)
     int box_x = 0;            // emoji_box_ offset from screen center
     int box_y = kBoxOffsetY;  // includes tilt, breathing, gaze and posture
 };
@@ -164,6 +165,11 @@ inline void RenderFrame(const Frame& frame, uint32_t* pixels) {
             }
             if (frame.blink && sy >= 32 && sy <= 38 && ((x >= 22 && x < 28) || (x >= 38 && x < 44))) {
                 color = (sy == 36 || sy == 37) ? 0xff343f35 : 0xfffff0d5;
+            }
+            if (frame.mouth > 0 && sy >= kMouthY && sy < kMouthY + kMouthH && x >= kMouthX && x < kMouthX + kMouthW) {
+                const uint8_t index = kMouthOverlays[frame.mouth > 1 ? 1 : 0][(sy - kMouthY) * kMouthW + (x - kMouthX)];
+                if (index != 0)
+                    color = kPalette[index];
             }
             const int dest_x = x + (kSpriteWidth - kFrameSize) / 2 + (sy < kEarRows ? frame.ear_shift : 0);
             pixels[y * kSpriteWidth + dest_x] = color;
@@ -329,6 +335,51 @@ private:
     uint64_t start_ms_ = 0;
 };
 
+// Playback loudness -> 0..1 mouth/squash level, after groki-bot's update_mouth:
+// the level is how far a chunk sits above the clip's running average loudness,
+// so mastered music does not pin the mouth open, with a fast attack and slow
+// release so consonants open the mouth at once and it closes gracefully.
+inline constexpr float kLoudSilenceDb = -55.f;     // below this the mouth is closed
+inline constexpr float kLoudRangeDb = 12.f;        // dB above baseline that reaches level 1
+inline constexpr float kLoudBaselineRate = 0.05f;  // per update, ~1 s to settle at 20 fps
+inline constexpr float kLoudAttack = 0.55f;
+inline constexpr float kLoudRelease = 0.20f;
+inline constexpr float kMouthHalfLevel = 0.20f;
+inline constexpr float kMouthOpenLevel = 0.55f;
+
+class LoudnessEnvelope {
+public:
+    void Reset() { level_ = 0.f; baseline_ = kLoudSilenceDb; primed_ = false; }
+    // dbfs: chunk loudness in dBFS (<= 0). Call once per animation frame.
+    float Update(float dbfs) {
+        float target = 0.f;
+        if (dbfs > kLoudSilenceDb) {
+            if (!primed_) {
+                baseline_ = dbfs - kLoudRangeDb * 0.5f;  // first sound: half open
+                primed_ = true;
+            } else {
+                baseline_ += (dbfs - baseline_) * kLoudBaselineRate;
+            }
+            target = (dbfs - baseline_ + kLoudRangeDb * 0.5f) / kLoudRangeDb;
+            target = target < 0.f ? 0.f : target > 1.f ? 1.f : target;
+        }
+        level_ += (target > level_ ? kLoudAttack : kLoudRelease) * (target - level_);
+        if (level_ < 0.01f)
+            level_ = 0.f;
+        return level_;
+    }
+    float level() const { return level_; }
+
+private:
+    float level_ = 0.f;
+    float baseline_ = kLoudSilenceDb;
+    bool primed_ = false;
+};
+
+inline int MouthLevel(float loudness) {
+    return loudness >= kMouthOpenLevel ? 2 : loudness >= kMouthHalfLevel ? 1 : 0;
+}
+
 // Everything that feeds one frame besides the clock.
 struct Scene {
     Pose pose;
@@ -373,6 +424,7 @@ inline Frame ComposeFrame(const Scene& scene, uint64_t ms) {
             case VoiceState::kThinking: gaze_x = kThinkLookX; gaze_y = -kThinkLookY; break;
             case VoiceState::kSpeaking:
                 frame.squash = scene.loudness < 0.f ? TalkBounce(ms) : scene.loudness;
+                frame.mouth = MouthLevel(frame.squash);
                 break;
             case VoiceState::kIdle: break;
         }
