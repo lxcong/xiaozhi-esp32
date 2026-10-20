@@ -1,4 +1,5 @@
 #include "xiaole_display.h"
+#include "application.h"
 #include "esp_timer.h"
 #include "xiaole_lvgl.h"
 
@@ -56,9 +57,18 @@ void XiaoleDisplay::ApplyLayout() {
 
 void XiaoleDisplay::SetEmotion(const char* emotion) {
     DisplayLockGuard lock(this);
-    mood_ = xiaole::MoodIndex(emotion);
+    expression_.SetBase(xiaole::MoodIndex(emotion));
     if (timer_)
         Animate();
+}
+
+xiaole::VoiceState XiaoleDisplay::CurrentVoiceState() const {
+    switch (Application::GetInstance().GetDeviceState()) {
+        case kDeviceStateListening: return xiaole::VoiceState::kListening;
+        case kDeviceStateConnecting: return xiaole::VoiceState::kThinking;
+        case kDeviceStateSpeaking: return xiaole::VoiceState::kSpeaking;
+        default: return xiaole::VoiceState::kIdle;
+    }
 }
 
 void XiaoleDisplay::SetChatMessage(const char* role, const char* content) {
@@ -91,8 +101,26 @@ void XiaoleDisplay::Animate() {
     // Called only with the LVGL lock held (LVGL timer callbacks already own it).
     // The simulator in tools/xiaole-sim runs this same sequence with a fake IMU.
     const uint64_t ms = esp_timer_get_time() / 1000;
-    const auto pose = !sleeping_ && imu_ ? imu_->Snapshot(ms) : xiaole::Pose{};
-    const auto frame = xiaole::ComposeFrame(pose, mood_, sleeping_, ms);
+    const auto voice = CurrentVoiceState();
+    if (voice != last_voice_) {
+        // Leaving idle: a short wink confirms the wake word (the gateway's
+        // WAKE_CONFIRM_EMOTION does the same). Other changes only move the posture.
+        if (last_voice_ == xiaole::VoiceState::kIdle)
+            expression_.SetOverlay(xiaole::kWinkingMood, 600);
+        expression_.SetVoice(voice);
+        last_voice_ = voice;
+    }
+    animator_.Tick(ms, sleeping_);
+    xiaole::Scene scene;
+    scene.pose = !sleeping_ && imu_ ? imu_->Snapshot(ms) : xiaole::Pose{};
+    scene.mix = expression_.Step(ms);
+    scene.eyes_open = animator_.eyes_open();
+    scene.gaze_x = animator_.gaze_x();
+    scene.gaze_y = animator_.gaze_y();
+    scene.voice = voice;
+    scene.loudness = loudness_.load();
+    scene.sleeping = sleeping_;
+    const auto frame = xiaole::ComposeFrame(scene, ms);
     xiaole::RenderFrame(frame, pixels_.data());
     xiaole::PresentFrame(frame, sprite_, emoji_image_, emoji_box_);
 }
