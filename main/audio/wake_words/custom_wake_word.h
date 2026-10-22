@@ -36,6 +36,13 @@ public:
     bool GetWakeWordOpus(std::vector<uint8_t>& opus);
     const std::string& GetLastDetectedWakeWord() const { return last_detected_wake_word_; }
     std::vector<std::string> GetWakeWords() const override;
+    // Replace the wake command at run time (MultiNet keeps its acoustic model; only the
+    // command list changes). `pinyin` is the space-separated pinyin MultiNet matches,
+    // `text` the name shown and reported. The previous command set is restored when
+    // MultiNet rejects the new phrase; `error` then says why.
+    bool SetWakeWord(const std::string& pinyin, const std::string& text, std::string& error);
+    // Pinyin of the first command with action "wake" ("" when none).
+    std::string GetWakeWordPinyin() const;
 
 private:
     struct Command {
@@ -72,6 +79,8 @@ private:
 
     void FeedSamples(const int16_t* data, size_t samples, bool mono);
     void ParseWakenetModelConfig();
+    void ApplyPersonaOverride();
+    bool RegisterCommands(std::string* error);
 };
 
 #endif

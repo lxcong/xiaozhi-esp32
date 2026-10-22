@@ -123,6 +123,9 @@ public:
     std::unique_ptr<AudioStreamPacket> PopWakeWordPacket();
     const std::string& GetLastWakeWord() const;
     std::vector<std::string> GetWakeWords() const;
+    // Change the wake word while running (see AudioEngine::SetWakeWord).
+    bool SetWakeWord(const std::string& pinyin, const std::string& text, std::string& error);
+    std::string GetWakeWordPinyin() const;
     bool IsVoiceDetected() const { return voice_detected_; }
     bool IsIdle();
     bool IsPlaybackIdle();

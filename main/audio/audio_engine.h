@@ -27,6 +27,14 @@ public:
     virtual bool IsVoiceProcessingEnabled() const = 0;
     virtual bool IsAfeWakeWord() const = 0;
     virtual std::vector<std::string> GetWakeWords() const = 0;
+    // Replace the wake word at run time. Only engines with a MultiNet command-word
+    // detector support this; the default reports why it cannot.
+    virtual bool SetWakeWord(const std::string& pinyin, const std::string& text, std::string& error) {
+        (void)pinyin; (void)text;
+        error = "wake word is not a command word on this device";
+        return false;
+    }
+    virtual std::string GetWakeWordPinyin() const { return ""; }
     virtual size_t GetFeedSize() const = 0;
 
     virtual void OnWakeWordDetected(std::function<void(const std::string& wake_word)> callback) = 0;

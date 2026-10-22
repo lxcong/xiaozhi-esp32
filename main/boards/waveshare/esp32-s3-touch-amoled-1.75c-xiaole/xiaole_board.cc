@@ -23,6 +23,7 @@
 #include <esp_timer.h>
 #include "esp_io_expander_tca9554.h"
 #include "settings.h"
+#include <cJSON.h>
 
 #include <esp_lcd_touch_cst9217.h>
 #include <esp_lvgl_port.h>
@@ -390,6 +391,95 @@ private:
         ESP_LOGI(TAG, "Touch panel initialized successfully");
     }
 
+    // MultiNet matches the wake word by its pinyin, one syllable per word ("xiao le").
+    // Normalizes spacing and case; rejects anything that is not 1..6 latin syllables.
+    static bool NormalizeWakePinyin(std::string& pinyin, std::string& error) {
+        std::string out;
+        int syllables = 0, letters = 0;
+        for (char c : pinyin) {
+            if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+            if (c >= 'a' && c <= 'z') {
+                if (letters == 0) syllables++;
+                if (++letters > 6) { error = "pinyin syllable too long"; return false; }
+                out += c;
+            } else if (c == ' ' || c == '\t' || c == '\'' || c == '-') {
+                if (letters > 0) out += ' ';
+                letters = 0;
+            } else {
+                error = "pinyin must be lowercase latin syllables separated by spaces";
+                return false;
+            }
+        }
+        while (!out.empty() && out.back() == ' ') out.pop_back();
+        if (syllables < 1 || syllables > 6) { error = "pinyin must have 1 to 6 syllables"; return false; }
+        pinyin = out;
+        return true;
+    }
+
+    // Name and wake word the user gave Xiaole in a conversation. NVS namespace "persona"
+    // (name, wake_cmd, wake_text) is also read by CustomWakeWord at boot, so the choice
+    // survives reboots and assets reflashes. The gateway keeps the same persona in its
+    // persona.json and reconciles on connect.
+    void InitializePersonaTools(McpServer& mcp_server) {
+        mcp_server.AddTool("self.persona.get",
+                           "Get the assistant's current name and the wake word the user says to "
+                           "wake the device, with the pinyin MultiNet listens for.",
+                           PropertyList(), [](const PropertyList&) -> ReturnValue {
+                               auto& audio = Application::GetInstance().GetAudioService();
+                               const auto words = audio.GetWakeWords();
+                               const std::string wake = words.empty() ? "" : words.front();
+                               Settings settings("persona", false);
+                               cJSON* json = cJSON_CreateObject();
+                               cJSON_AddStringToObject(json, "name", settings.GetString("name", wake).c_str());
+                               cJSON_AddStringToObject(json, "wake_word", wake.c_str());
+                               cJSON_AddStringToObject(json, "wake_pinyin", audio.GetWakeWordPinyin().c_str());
+                               cJSON_AddBoolToObject(json, "customized", !settings.GetString("wake_cmd").empty());
+                               return json;
+                           });
+        mcp_server.AddTool("self.persona.set_name",
+                           "Rename the assistant. The device's wake word changes to the new name at once "
+                           "(no reboot): `name` is the new Chinese name, `wake_pinyin` its pinyin with one "
+                           "syllable per word (小乐 -> \"xiao le\"), `wake_word` optionally a different "
+                           "word to wake with (defaults to the name). Returns an error text when the "
+                           "speech model cannot take the phrase; the old name stays then.",
+                           PropertyList({Property("name", kPropertyTypeString),
+                                         Property("wake_pinyin", kPropertyTypeString),
+                                         Property("wake_word", kPropertyTypeString, std::string(""))}),
+                           [this](const PropertyList& properties) -> ReturnValue {
+                               const auto name = properties["name"].value<std::string>();
+                               auto pinyin = properties["wake_pinyin"].value<std::string>();
+                               auto wake = properties["wake_word"].value<std::string>();
+                               if (wake.empty()) wake = name;
+                               std::string error;
+                               if (name.empty() || name.size() > 32) {
+                                   return std::string("failed: name must be 1 to 32 bytes");
+                               }
+                               if (!NormalizeWakePinyin(pinyin, error)) {
+                                   return "failed: " + error;
+                               }
+                               auto& audio = Application::GetInstance().GetAudioService();
+                               if (!audio.SetWakeWord(pinyin, wake, error)) {
+                                   return "failed: " + error;
+                               }
+                               {
+                                   Settings settings("persona", true);
+                                   settings.SetString("name", name);
+                                   settings.SetString("wake_cmd", pinyin);
+                                   settings.SetString("wake_text", wake);
+                               }
+                               ESP_LOGI(TAG, "Persona renamed to %s, wake word %s (%s)", name.c_str(),
+                                        wake.c_str(), pinyin.c_str());
+                               const std::string message = "以后叫我「" + name + "」吧";
+                               display_->SetChatMessage("assistant", message.c_str());
+                               cJSON* json = cJSON_CreateObject();
+                               cJSON_AddBoolToObject(json, "ok", true);
+                               cJSON_AddStringToObject(json, "name", name.c_str());
+                               cJSON_AddStringToObject(json, "wake_word", wake.c_str());
+                               cJSON_AddStringToObject(json, "wake_pinyin", pinyin.c_str());
+                               return json;
+                           });
+    }
+
     // 初始化工具
     void InitializeTools() {
         auto& mcp_server = McpServer::GetInstance();
@@ -400,6 +490,7 @@ private:
                                EnterWifiConfigMode();
                                return true;
                            });
+        InitializePersonaTools(mcp_server);
     }
 
 public:

@@ -52,6 +52,53 @@
 图像在 LVGL 锁内更新，20 fps；约 84 KiB 只读调色板素材 + 18 KiB 可变像素缓冲。
 设备服务与 Board 同寿命，不支持在运行中销毁 Board。
 
+## 名字与唤醒词（对话中可改）
+
+唤醒词是 MultiNet6 的命令词，固件只换命令词列表、不换声学模型，所以可以在运行中改：
+
+- MCP 工具 `self.persona.get` 返回当前名字、唤醒词和它的拼音；`self.persona.set_name(name, wake_pinyin,
+  wake_word?)` 当场把唤醒词换成新词（`CustomWakeWord::SetWakeWord`：持输入缓冲锁，清空并重新注册命令词，
+  `esp_mn_commands_update` 拒绝的词会回滚到旧词并返回 `failed: ...`）。成功后写入 NVS 命名空间
+  `persona`（`name`、`wake_cmd`、`wake_text`），屏幕字幕显示「以后叫我「X」吧」。
+- 开机时 `CustomWakeWord::Initialize` 先读 index.json / Kconfig 里的命令词，再用 NVS 里的覆盖
+  `action=wake` 的那条；覆盖的词 MultiNet 解析不了时退回默认词，设备不会因此叫不醒。重刷 assets
+  不会改掉名字；要恢复出厂名字就擦掉 `persona` 命名空间（或重新配网清 NVS）。
+- 拼音一字一音节、小写、空格分隔（`xiao le`），1–6 个音节；网关用 pypinyin 生成并限制 2–4 个汉字。
+  英文名需要 mn6_en 模型（约 3.5 MB），当前 9 MB 的 assets 分区放不下第二个模型。
+- 网关侧（`integrations/groki-gateway/gateway`）的 `rename_assistant` 语音工具先调设备、设备接受后才
+  写 `persona.json`，并在设备每次连上时对账；人设模板 `personality.md` 里的 `{{name}}` 从同一处填。
+
+## 小游戏（Lua 脚本）
+
+兔子上面可以叠一层由脚本驱动的画布玩小游戏。脚本引擎是 Lua 5.4（`components/lua`，只开
+base/coroutine/table/string/math/utf8），运行时在 `xiaole_script.h`（固件与模拟器共用，纯
+LVGL 9 + Lua）：全屏 466×466 ARGB8888 画布（868 KB，PSRAM）放在所有控件之上，脚本每帧把
+东西画上去，运行时只清除并刷新上一帧和这一帧画过的矩形，不整屏重绘。脚本看到的 API：
+
+| 全局 | 说明 |
+| --- | --- |
+| `screen.w/.h/.cx/.cy/.r`, `screen.text/.bg` | 466 圆屏；当前主题的文字/背景色（0xRRGGBB） |
+| `gfx.circle/ring/rect/frame/line/text`, `gfx.text_size`, `gfx.line_height` | 只能在 `draw()` 里调用；颜色 0xRRGGBB，透明度 0..255；文字用设备字体（30 px），默认主题文字色 |
+| `xiaole.emotion(name[, hold_ms])` | 在当前表情上叠加一个表情（同表情引擎的 overlay） |
+| `xiaole.say(text)` | 字幕；空串隐藏 |
+| `xiaole.squash(level)` | 0..1 身体压缩，-1 交还给口型响度 |
+| `xiaole.move(dx, dy)` | 身体额外位移（屏幕像素），瞳孔也会跟着看过去 |
+| `xiaole.box()` → x,y,w,h | 兔子精灵当前在屏幕上的框 |
+| `xiaole.tilt()` → x,y | IMU 姿态（±24、±12 像素） |
+| `game.time()` / `game.log()` / `game.exit()` | 毫秒时钟、日志、结束游戏 |
+
+脚本定义 `init()`、`tick(dt_ms)`、`draw()`、`touch(kind, x, y)`（kind 为 `down/move/up`）。
+触摸事件在 LVGL 任务里只入队，脚本一律在游戏任务里执行（30 fps，48 KB 栈放 PSRAM，Lua 堆也在
+PSRAM），每次进入 Lua 都是保护调用：第一个错误就停掉游戏并把信息写进日志和 `GameError()`。
+
+目前内置一个脚本 `games/catch.lua`（抛接球）：向上滑动把球扔给小乐；球进到她爪子前的圆里就算
+接住（happy 表情、“接到啦！”），她会朝球的方向侧身，停半秒后带一下压缩动作把球扔回来
+（落点随分数越来越散、飞行时间越来越短）；把手套拖到球下面接住得 1 分，漏三次一局结束，点一下
+重来。左上角的 X 退出。启动方式：长按兔子（LVGL 长按 400 ms），或由大模型调用 MCP 工具
+`self.game.start`（参数 `name`，默认 `catch`）；`self.game.stop` 结束。游戏期间会定时唤醒省电
+定时器，屏幕不会在对局中变暗；唤醒词和对话照常工作。脚本由 `main/CMakeLists.txt` 以
+`EMBED_TXTFILES` 嵌进固件，`xiaole_display.cc` 的 `kGames` 表按名字查找。
+
 ## 构建
 
 ESP-IDF 最低 6.0.1（本次使用 6.0.1）。在仓库根目录运行：

@@ -654,6 +654,19 @@ std::vector<std::string> AudioService::GetWakeWords() const {
     return audio_engine_initialized_ ? audio_engine_->GetWakeWords() : std::vector<std::string>{};
 }
 
+bool AudioService::SetWakeWord(const std::string& pinyin, const std::string& text,
+                               std::string& error) {
+    if (!audio_engine_initialized_) {
+        error = "audio engine not initialized";
+        return false;
+    }
+    return audio_engine_->SetWakeWord(pinyin, text, error);
+}
+
+std::string AudioService::GetWakeWordPinyin() const {
+    return audio_engine_initialized_ ? audio_engine_->GetWakeWordPinyin() : "";
+}
+
 std::unique_ptr<AudioStreamPacket> AudioService::PopWakeWordPacket() {
     auto packet = std::make_unique<AudioStreamPacket>();
     if (audio_engine_ && audio_engine_->GetWakeWordOpus(packet->payload)) {

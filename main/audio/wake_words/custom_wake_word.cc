@@ -2,6 +2,7 @@
 #include "audio_service.h"
 #include "system_info.h"
 #include "assets.h"
+#include "settings.h"
 
 #include <esp_log.h>
 #include <esp_mn_iface.h>
@@ -82,6 +83,102 @@ void CustomWakeWord::ParseWakenetModelConfig() {
 }
 
 
+// The user can rename the assistant from a conversation (MCP tool self.persona.set_name).
+// The chosen wake command lives in NVS namespace "persona" and replaces the "wake"
+// commands from index.json / Kconfig, so a reflash of the assets keeps the name.
+void CustomWakeWord::ApplyPersonaOverride() {
+    Settings settings("persona", false);
+    std::string pinyin = settings.GetString("wake_cmd");
+    std::string text = settings.GetString("wake_text");
+    if (pinyin.empty() || text.empty()) {
+        return;
+    }
+    std::deque<Command> commands;
+    commands.push_back({pinyin, text, "wake"});
+    for (const auto& command : commands_) {
+        if (command.action != "wake") {
+            commands.push_back(command);
+        }
+    }
+    commands_ = std::move(commands);
+    ESP_LOGI(TAG, "Persona wake word override: %s (%s)", text.c_str(), pinyin.c_str());
+}
+
+// Push commands_ into MultiNet. Returns false (with the rejected phrases in *error)
+// when the language model could not take one of them; the caller decides what to
+// restore. Must be called with input_buffer_mutex_ held once detection runs.
+bool CustomWakeWord::RegisterCommands(std::string* error) {
+    esp_mn_commands_clear();
+    for (int i = 0; i < commands_.size(); i++) {
+        esp_mn_commands_add(i + 1, commands_[i].command.c_str());
+    }
+    esp_mn_error_t* err = esp_mn_commands_update();
+    if (err != nullptr && err->num > 0) {
+        std::string rejected;
+        for (int i = 0; i < err->num; i++) {
+            if (err->phrases != nullptr && err->phrases[i] != nullptr &&
+                err->phrases[i]->string != nullptr) {
+                if (!rejected.empty()) rejected += ", ";
+                rejected += err->phrases[i]->string;
+            }
+        }
+        if (error != nullptr) {
+            *error = "MultiNet rejected: " + rejected;
+        }
+        ESP_LOGW(TAG, "MultiNet rejected %d command(s): %s", err->num, rejected.c_str());
+        return false;
+    }
+    return true;
+}
+
+bool CustomWakeWord::SetWakeWord(const std::string& pinyin, const std::string& text,
+                                 std::string& error) {
+    if (multinet_model_data_ == nullptr) {
+        error = "wake word engine not initialized";
+        return false;
+    }
+    if (pinyin.empty() || text.empty()) {
+        error = "empty wake word";
+        return false;
+    }
+    // FeedSamples holds this mutex around detect(), so the command list never changes
+    // under a running detection. The AFE task waits a few tens of ms at most.
+    std::lock_guard<std::mutex> lock(input_buffer_mutex_);
+    std::deque<Command> previous = commands_;
+    std::deque<Command> commands;
+    commands.push_back({pinyin, text, "wake"});
+    for (const auto& command : previous) {
+        if (command.action != "wake") {
+            commands.push_back(command);
+        }
+    }
+    commands_ = std::move(commands);
+    if (!RegisterCommands(&error)) {
+        commands_ = std::move(previous);
+        std::string restore_error;
+        if (!RegisterCommands(&restore_error)) {
+            ESP_LOGE(TAG, "Failed to restore previous wake word: %s", restore_error.c_str());
+        }
+        multinet_->clean(multinet_model_data_);
+        input_buffer_.clear();
+        return false;
+    }
+    multinet_->clean(multinet_model_data_);
+    input_buffer_.clear();
+    multinet_->print_active_speech_commands(multinet_model_data_);
+    ESP_LOGI(TAG, "Wake word changed to %s (%s)", text.c_str(), pinyin.c_str());
+    return true;
+}
+
+std::string CustomWakeWord::GetWakeWordPinyin() const {
+    for (const auto& command : commands_) {
+        if (command.action == "wake") {
+            return command.command;
+        }
+    }
+    return "";
+}
+
 bool CustomWakeWord::Initialize(AudioCodec* codec, srmodel_list_t* models_list) {
     codec_ = codec;
     commands_.clear();
@@ -120,11 +217,15 @@ bool CustomWakeWord::Initialize(AudioCodec* codec, srmodel_list_t* models_list) 
     multinet_model_data_ = multinet_->create(mn_name_, duration_);
     multinet_->set_det_threshold(multinet_model_data_, threshold_);
     input_buffer_.reserve(multinet_->get_samp_chunksize(multinet_model_data_));
-    esp_mn_commands_clear();
-    for (int i = 0; i < commands_.size(); i++) {
-        esp_mn_commands_add(i + 1, commands_[i].command.c_str());
+    std::deque<Command> defaults = commands_;
+    ApplyPersonaOverride();
+    std::string error;
+    if (!RegisterCommands(&error)) {
+        // A persona override MultiNet cannot parse must not leave the device deaf.
+        ESP_LOGW(TAG, "Falling back to the default wake word: %s", error.c_str());
+        commands_ = std::move(defaults);
+        RegisterCommands(nullptr);
     }
-    esp_mn_commands_update();
     
     multinet_->print_active_speech_commands(multinet_model_data_);
 #if CONFIG_SEND_WAKE_WORD_DATA

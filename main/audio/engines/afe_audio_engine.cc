@@ -321,6 +321,19 @@ std::vector<std::string> AfeAudioEngine::GetWakeWords() const {
     return custom_wake_word_ ? custom_wake_word_->GetWakeWords() : wake_words_;
 }
 
+bool AfeAudioEngine::SetWakeWord(const std::string& pinyin, const std::string& text,
+                                 std::string& error) {
+    if (wake_detector_ != WakeDetector::kMultiNet || !custom_wake_word_) {
+        error = "wake word is not a command word on this device";
+        return false;
+    }
+    return custom_wake_word_->SetWakeWord(pinyin, text, error);
+}
+
+std::string AfeAudioEngine::GetWakeWordPinyin() const {
+    return custom_wake_word_ ? custom_wake_word_->GetWakeWordPinyin() : "";
+}
+
 bool AfeAudioEngine::IsWakeWordDetectionEnabled() const {
     return event_group_ != nullptr && (xEventGroupGetBits(event_group_) & kWakeWordEnabled) != 0;
 }
