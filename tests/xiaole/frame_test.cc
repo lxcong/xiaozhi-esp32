@@ -6,10 +6,46 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <iostream>
+#include <vector>
 #include "xiaole_frame.h"
 
-int main() {
+namespace {
+
+// The builtin rabbit serialised as an avatar pack (the format assets/xiaole/generate.py
+// writes), so the pack path can be checked against the compiled-in tables.
+std::vector<uint8_t> BuiltinAsPack() {
+    using namespace xiaole;
+    const SpriteSet& b = BuiltinSprites();
+    std::vector<uint8_t> out(kAvatarPackHeaderSize, 0);
+    std::memcpy(out.data(), "XLAV", 4);
+    out[4] = kAvatarPackVersion;
+    out[6] = kAvatarPackHeaderSize;
+    out[8] = out[9] = kFrameSize;
+    out[10] = kMoodCount;
+    out[11] = static_cast<uint8_t>(b.palette_count);
+    const AvatarLayout& L = b.layout;
+    const int layout[] = {L.left_eye_x, L.right_eye_x, L.eye_top, L.eye_rows, L.brow_row, L.mouth_x, L.mouth_y,
+                          L.mouth_w, L.mouth_h, kMouthLevels, L.ear_rows, L.content_top, L.content_bottom,
+                          kBuiltinFaceIndex, kBuiltinInkIndex, kBuiltinHighlightIndex, L.pupil_style};
+    for (size_t i = 0; i < std::size(layout); ++i)
+        out[12 + i] = static_cast<uint8_t>(layout[i]);
+    std::memcpy(out.data() + 32, b.id, std::strlen(b.id));
+    std::memcpy(out.data() + 48, b.name, std::strlen(b.name));
+    for (int i = 0; i < b.palette_count; ++i)
+        for (int k = 0; k < 4; ++k)
+            out.push_back(static_cast<uint8_t>(b.palette[i] >> (8 * k)));
+    for (int i = 0; i < kMoodCount; ++i)
+        out.insert(out.end(), b.frames[i], b.frames[i] + kFrameSize * kFrameSize);
+    for (int i = 0; i < kMouthLevels; ++i)
+        out.insert(out.end(), b.mouth[i], b.mouth[i] + L.mouth_w * L.mouth_h);
+    return out;
+}
+
+}  // namespace
+
+int main(int argc, char** argv) {
     using namespace xiaole;
     static uint32_t pixels[kSpriteWidth * kSpriteHeight];
     static_assert(kMoodCount == 21, "21 moods are exported by assets/xiaole/export_firmware.py");
@@ -492,7 +528,98 @@ int main() {
         assert(a.params.gaze_amplitude == 2);
     }
 
+    {
+        // Avatar pack: the builtin rabbit serialised as a pack loads back and renders the
+        // same pixels through every drawing path (blend, blink, pupils, brows, lids, mouth,
+        // squash, ears); corrupt packs are refused and leave the set untouched.
+        const std::vector<uint8_t> pack = BuiltinAsPack();
+        SpriteSet loaded;
+        const char* error = nullptr;
+        assert(LoadAvatarPack(pack.data(), pack.size(), loaded, &error));
+        assert(!loaded.builtin && std::strcmp(loaded.id, kBuiltinAvatarId) == 0 && std::strcmp(loaded.name, kBuiltinAvatarName) == 0);
+        assert(loaded.palette_count == BuiltinSprites().palette_count && loaded.face == 0xfffff0d5 && loaded.ink == 0xff343f35);
+        assert(loaded.layout.left_eye_x == kLeftEyeX && loaded.layout.mouth_w == kMouthW && loaded.layout.ear_rows == kEarRows);
+        static uint32_t from_pack[kSpriteWidth * kSpriteHeight];
+        Frame cases[8];
+        cases[1].mood = 1; cases[1].mood_from = 0; cases[1].blend = 0.4f;
+        cases[2].blink = true;
+        cases[3].pupil_x = 2; cases[3].pupil_y = -1; cases[3].pupil_size = 2;
+        cases[4].mood = cases[4].mood_from = cases[4].mood_hold = kAngryMood; cases[4].brows = 1; cases[4].eye_open = 0.5f;
+        cases[5].mouth = 2; cases[5].squash = 0.7f;
+        cases[6].ear_shift = 2; cases[6].mood = cases[6].mood_from = kConfusedMood; cases[6].brows = 3; cases[6].right_lid_extra = 3;
+        cases[7].mood = cases[7].mood_from = cases[7].mood_hold = kSadMood; cases[7].pupil_size = 0; cases[7].highlight = false; cases[7].eye_open = 0.f;
+        for (const Frame& f : cases) {
+            RenderFrame(f, pixels);
+            RenderFrame(f, from_pack, loaded);
+            assert(std::memcmp(pixels, from_pack, sizeof(pixels)) == 0);
+        }
+        for (int mood = 0; mood < kMoodCount; ++mood) {
+            Frame f;
+            f.mood = f.mood_from = f.mood_hold = mood;
+            RenderFrame(f, pixels);
+            RenderFrame(f, from_pack, loaded);
+            assert(std::memcmp(pixels, from_pack, sizeof(pixels)) == 0);
+        }
+        // The pupil style shifts the engine's pupil size: big style draws the 4x6 pupil at size 1.
+        SpriteSet big = loaded;
+        big.layout.pupil_style = 2;
+        Frame plain;
+        RenderFrame(plain, from_pack, big);
+        Frame big_pupils;
+        big_pupils.pupil_size = 2;
+        RenderFrame(big_pupils, pixels);
+        assert(std::memcmp(pixels, from_pack, sizeof(pixels)) == 0);
+        // Refusals: short, bad magic, wrong version, wrong mood count, index past the palette,
+        // eye box outside the frame, content rows outside the checked band.
+        SpriteSet untouched = BuiltinSprites();
+        auto refuse = [&](std::vector<uint8_t> bad, const char* what) {
+            const char* why = nullptr;
+            const bool ok = LoadAvatarPack(bad.data(), bad.size(), untouched, &why);
+            assert(!ok && why != nullptr && untouched.builtin);
+            (void)what;
+        };
+        refuse(std::vector<uint8_t>(pack.begin(), pack.begin() + 40), "short");
+        refuse(std::vector<uint8_t>(pack.begin(), pack.end() - 1), "truncated");
+        { auto bad = pack; bad[0] = 'Y'; refuse(bad, "magic"); }
+        { auto bad = pack; bad[4] = 2; refuse(bad, "version"); }
+        { auto bad = pack; bad[10] = 20; refuse(bad, "moods"); }
+        { auto bad = pack; bad[kAvatarPackHeaderSize + 4 * bad[11] + 100] = 200; refuse(bad, "frame index"); }
+        { auto bad = pack; bad.back() = 250; refuse(bad, "mouth index"); }
+        { auto bad = pack; bad[13] = 60; refuse(bad, "right eye past the frame"); }
+        { auto bad = pack; bad[23] = 0; refuse(bad, "content above the checked band"); }
+        { auto bad = pack; bad[25] = bad[11]; refuse(bad, "face colour index"); }
+        assert(LoadAvatarPack(nullptr, 0, untouched, &error) == false);
+        // An external pack (argv[1], e.g. from assets/xiaole/export_pack.py) must load and
+        // keep every mood inside the frame contract the layout was checked against.
+        if (argc > 1) {
+            std::ifstream in(argv[1], std::ios::binary);
+            std::vector<uint8_t> file((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+            SpriteSet external;
+            const char* why = nullptr;
+            if (!LoadAvatarPack(file.data(), file.size(), external, &why)) {
+                std::cerr << argv[1] << ": " << (why ? why : "?") << "\n";
+                return 1;
+            }
+            for (int mood = 0; mood < kMoodCount; ++mood) {
+                Frame f;
+                f.mood = f.mood_from = f.mood_hold = mood;
+                f.mouth = mood % 3;
+                f.blink = mood % 4 == 0;
+                RenderFrame(f, pixels, external);
+                for (int y = 0; y < external.layout.content_top; ++y)
+                    for (int x = 0; x < kSpriteWidth; ++x)
+                        assert(pixels[y * kSpriteWidth + x] == 0);
+                for (int y = external.layout.content_bottom + 1; y < kSpriteHeight; ++y)
+                    for (int x = 0; x < kSpriteWidth; ++x)
+                        assert(pixels[y * kSpriteWidth + x] == 0);
+            }
+            std::cout << "external pack " << external.id << " (" << external.name << "): " << external.palette_count
+                      << " colours, 21 moods render inside rows " << external.layout.content_top << ".."
+                      << external.layout.content_bottom << "\n";
+        }
+    }
+
     std::cout << "frame mood selection, blink window, ear rows, box offset, subtitle geometry, "
                  "expression engine, animator, blending, squash, loudness envelope, mouth overlay, pupils, "
-                 "eye expression, blink styles: PASS\n";
+                 "eye expression, blink styles, avatar pack: PASS\n";
 }

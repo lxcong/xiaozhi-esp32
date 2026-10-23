@@ -68,6 +68,44 @@
 - 网关侧（`integrations/groki-gateway/gateway`）的 `rename_assistant` 语音工具先调设备、设备接受后才
   写 `persona.json`，并在设备每次连上时对账；人设模板 `personality.md` 里的 `{{name}}` 从同一处填。
 
+## 形象（avatar pack，对话中可换）
+
+小乐的 21 张表情帧不再只有编译进固件的一份：`xiaole_frame.h` 通过 `xiaole::SpriteSet`
+（`xiaole_avatar.h`）取帧、调色板、嘴型贴片和布局，默认指向 `xiaole_sprites.h` 的内置兔子，
+assets 分区里有形象包时切到包。
+
+- **包格式** `XLAV` v1（`xiaole_avatar.h` 文件头有逐字节说明）：64 字节头（版本、帧数、调色板
+  大小、眼框 / 眉行 / 嘴框 / 耳朵行数 / 内容上下界、程序画眼睛用的三个颜色索引、瞳孔风格、id、名字）
+  + ARGB 调色板 + 21 张 64×64 索引帧（`kMoods` 顺序）+ 2 张嘴型贴片，约 86 KB。头部按字节读：资源
+  在 mmap 里的偏移是奇数，不能按 uint32 解引用。加载时校验幻数、尺寸、索引越界、眼框和嘴框在帧内、
+  内容行在 3..58 之间（屏幕布局的 static_assert 按这个范围算过）；不合格的包被拒绝并保留内置兔子。
+- **设备侧**：`Assets::Apply` 看 index.json 的 `avatar_pack` 字段，取出条目交给
+  `Display::SetAvatarPack`（基类空实现，`XiaoleDisplay` 实现）；`Assets::Download` 重写分区前先
+  `SetAvatarPack(nullptr)` 退回内置数据。包的 id 和 NVS `persona/avatar_id` 不同时做 3 秒 happy
+  叠加，提示换好了。MCP 工具 `self.avatar.get` 返回来源 / id / 名字；`self.avatar.update(url)` 把
+  地址写进 NVS `assets/download_url` 并用 esp_timer 在 1.5 秒后重启（等价于 user-only 的
+  `self.assets.set_download_url` + `self.reboot`，网关的 tools/list 看不到那两个；重启不能直接
+  `Schedule` 到主循环，否则排在工具回复前面、回复发不出去），开机 `CheckAssetsVersion` 下载
+  （LAN 约 70 KB/s，6.5 MB 约 100 秒）、校验后 Apply。名字和唤醒词在 NVS `persona` 里，重刷 assets 不受影响。
+- **实时预览**：`self.avatar.preview(url)` 把一个包（≤ 512 KB）下载进 PSRAM，`XiaoleDisplay::PreviewAvatarPack`
+  接管缓冲并立刻改画它（眨一下眼示意），分区不动；`self.avatar.preview_end`、对话结束（设备状态回到 idle
+  3 秒）或 10 分钟后退回 `live_sprites_`。`self.avatar.get` 多返回 `preview` / `preview_id`。网关的
+  `design_avatar` 每一轮草稿都走这条路，用户看着屏幕反复改，拍板后才 `self.avatar.update`。
+- **生成**：工作区 `assets/xiaole/generate.py` 按 spec JSON 画（物种 rabbit/cat/bear/dog/mouse/fox/
+  panda/robot、耳朵形状和长度、身体 / 描边 / 内耳 / 腮红 / 鼻子 / 点缀色、眼睛风格 round/big/dot、
+  花纹 none/eye_patches/belly/stripes/spots、配饰 scarf/bow/glasses/hat(beanie/cap/crown)），表情逻辑
+  （眼 / 嘴 / 眉 / 泪 / 汗 / 爱心 / 装饰）对每个 spec 一样，所以 21 个表情自动配套；`check_contract`
+  保证眼框只含脸色 / 墨色 / 高光（引擎会用脸色擦掉重画）、嘴框是脸色、内容行不出界。纯 Python，不依赖
+  Pillow。`export_pack.py spec.json out.bin --sheet sheet.png` 导出包和 contact sheet；
+  `export_firmware.py` 用默认 spec 重建本目录 `xiaole_sprites.h`（含布局常量），默认兔子与之前逐像素相同。
+- **瞳孔风格**：包头的 `pupil_style` 把 `Frame::pupil_size` 整体偏移一档（dot/round/big），其余程序化
+  眼睛逻辑不变；眼镜等配饰画在 8 列眼框之外，`cool` 自带墨镜时不画眼镜。
+- 模拟器 `tools/xiaole-sim --avatar pack.bin`（或 `--assets` 镜像的 index.json 带 `avatar_pack`）
+  走同一份加载代码；`tests/xiaole/frame_test.cc` 把内置兔子序列化成包再加载，逐像素比对两条渲染路径，
+  并拒绝截断 / 错幻数 / 索引越界等坏包；带一个包路径参数时额外检查该包 21 个表情都在内容行内。
+- 网关侧（`integrations/groki-gateway/gateway`）的 `design_avatar` / `apply_avatar` 语音工具把描述变成
+  spec、渲染预览、用户确认后打成 assets 镜像并调 `self.avatar.update`，见 gateway/README.zh-CN。
+
 ## 小游戏（Lua 脚本）
 
 兔子上面可以叠一层由脚本驱动的画布玩小游戏。脚本引擎是 Lua 5.4（`components/lua`，只开
@@ -124,9 +162,9 @@ python scripts/build.py waveshare/esp32-s3-touch-amoled-1.75c-xiaole \
 `xiao le` / “小乐”，阈值 0.2，识别时长 3000 ms。资源上限按设备 assets 分区取 9 MB。
 固件音频引擎会从资源中的模型选择 MultiNet。脚本不会执行刷写。
 
-小乐图像由工作区 `assets/xiaole/generate.py` 生成，使用
-`assets/xiaole/export_firmware.py` 重建本目录 `xiaole_sprites.h`。
-修改美术素材后先导出，再编译。`preview_motion.py` 的 GIF 是动效示意，不是真机截图。
+小乐图像由工作区 `assets/xiaole/generate.py` 按 spec 生成（见上面“形象”一节），使用
+`assets/xiaole/export_firmware.py` 重建本目录 `xiaole_sprites.h`（内置兔子）。
+修改画法后先导出、跑 `tests/xiaole/frame_test.cc`，再编译。`preview_motion.py` 的 GIF 是动效示意，不是真机截图。
 
 ## 验证
 
@@ -141,7 +179,8 @@ python -m unittest discover -s scripts/tests -v
 ```
 
 主机测试覆盖校准、倾斜、摇晃冷却、无效输入、运动边界、字幕四角圆屏几何、换行行数和步进滚动曲线；`tests/xiaole/frame_test.cc`
-以同样方式编译 `xiaole_frame.h`，覆盖表情选择、眨眼窗口、耳朵行偏移与位置偏移。
+以同样方式编译 `xiaole_frame.h`，覆盖表情选择、眨眼窗口、耳朵行偏移与位置偏移、表情引擎和形象包的加载 / 拒绝；
+给它一个包路径（`/tmp/xiaole-frame-test pack.bin`）还会检查该包的 21 个表情都画在内容行内。
 
 像素合成（`xiaole_frame.h`）与 LVGL 布局/精灵描述（`xiaole_lvgl.h`）从 `xiaole_display.cc`
 抽出，供固件与工作区 `tools/xiaole-sim`（macOS 上 LVGL 9.5 + SDL2 的主机模拟器）共用：

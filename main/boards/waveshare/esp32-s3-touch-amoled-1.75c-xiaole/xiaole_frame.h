@@ -4,15 +4,17 @@
 #include <cstdint>
 #include <cstring>
 #include <iterator>
+#include "xiaole_avatar.h"
 #include "xiaole_motion.h"
-#include "xiaole_sprites.h"
 
 // Pixel compositing shared by the firmware (xiaole_display.cc) and the host
 // simulator (tools/xiaole-sim). No LVGL or ESP-IDF dependency: everything here is
 // pure arithmetic over the palette sprites, so both targets render identical frames.
+// The sprites come from a SpriteSet (xiaole_avatar.h): the builtin rabbit or an avatar
+// pack from the assets partition; the layout constants below are the builtin's and
+// double as the geometry the screen layout was checked against.
 namespace xiaole {
 
-inline constexpr int kFrameSize = 64;      // Palette frames are 64x64.
 inline constexpr int kSpriteWidth = 72;    // 4 px of ear travel on each side.
 inline constexpr int kSpriteHeight = 64;
 // Layout presets. kLayoutLarge = 1: 5x sprite (360x320), icons and status on one line at
@@ -23,8 +25,6 @@ inline constexpr int kSpriteHeight = 64;
 #endif
 inline constexpr int kLayoutLarge = XIAOLE_LAYOUT_LARGE;
 inline constexpr int kSpriteScale = kLayoutLarge ? 5 : 4;     // 72x64 -> 360x320 or 288x256
-inline constexpr int kEarRows = 24;        // Rows above this follow the ear offset.
-inline constexpr int kMoodCount = static_cast<int>(std::size(kFrames));
 inline constexpr int kNeutralMood = 0;
 inline constexpr int kSurprisedMood = 9;
 inline constexpr int kThinkingMood = 11;
@@ -32,18 +32,12 @@ inline constexpr int kWinkingMood = 12;
 inline constexpr int kSleepyMood = 18;
 inline constexpr int kTopLineY = kLayoutLarge ? 24 : 46;   // icons (and status text) row
 inline constexpr int kTopLineH = 38;
-inline constexpr int kBoxOffsetY = kLayoutLarge ? -14 : -24;  // content rows 3..58 between the top line and the subtitle
-inline constexpr int kContentTop = 3;       // first sprite row with pixels (ear tips)
-inline constexpr int kContentBottom = 58;   // last sprite row with pixels (feet)
+inline constexpr int kBoxOffsetY = kLayoutLarge ? -14 : -24;  // content rows kContentTop..kContentBottom between the top line and the subtitle
 
 // Pupil gaze: moods drawn with the plain "open" eye can look around by moving the
-// 3x6 pupil (and its highlight) inside an 8x8 eye box (one cream column added on each
-// side of the sprite's 6 px eye); bit 1 = left eye, 2 = right. Horizontal range is
-// +-2 pixels (8 on screen), vertical +-1.
-inline constexpr int kLeftEyeX = 22;
-inline constexpr int kRightEyeX = 38;
-inline constexpr int kEyeTop = 32;
-inline constexpr int kEyeRows = 8;
+// 3x6 pupil (and its highlight) inside an 8x8 eye box (one face-coloured column added
+// on each side of the sprite's 6 px eye at kLeftEyeX/kRightEyeX, rows kEyeTop..);
+// bit 1 = left eye, 2 = right. Horizontal range is +-2 pixels (8 on screen), vertical +-1.
 inline constexpr int kPupilRangeX = 2;
 inline constexpr int kPupilRangeY = 1;
 constexpr uint8_t EyePupils(int mood) {
@@ -56,7 +50,6 @@ constexpr uint8_t EyePupils(int mood) {
 inline constexpr int kAngryMood = 5;
 inline constexpr int kSadMood = 4;
 inline constexpr int kConfusedMood = 20;
-inline constexpr int kBrowRow = 30;  // procedural brows use rows 30..31 above the eye box
 
 // Subtitle region. Large layout: x=103..363, y=366..402 (260x36), one line. Compact
 // layout: x=83..383, y=326..398 (300x72), two lines. Every corner stays inside the
@@ -113,8 +106,6 @@ constexpr int SubtitleScrollOffset(int overflow, int t_ms) {
 }
 inline constexpr uint32_t kBlinkPeriodMs = 4200;
 inline constexpr uint32_t kBlinkOpenMs = 4020;  // Eyes are closed for the last 180 ms of the period.
-
-static_assert(kMoodCount == static_cast<int>(std::size(kMoods)), "mood table mismatch");
 
 // Index into kMoods/kFrames for an emotion name; unknown names map to neutral.
 inline int MoodIndex(const char* emotion) {
@@ -178,14 +169,20 @@ inline uint32_t LerpColor(uint32_t a, uint32_t b, float t) {
     return out;
 }
 
-// Fills `pixels` (kSpriteWidth * kSpriteHeight ARGB8888, row-major) from the palette
-// frames. Transition: source = hold active ? lerp(from, hold, hold_blend) : from, then
-// lerp(source, mood, blend). Squash resamples rows toward the bottom edge.
-inline void RenderFrame(const Frame& frame, uint32_t* pixels) {
+// Fills `pixels` (kSpriteWidth * kSpriteHeight ARGB8888, row-major) from the sprite
+// set's palette frames. Transition: source = hold active ? lerp(from, hold, hold_blend)
+// : from, then lerp(source, mood, blend). Squash resamples rows toward the bottom edge.
+// Eyes, brows, blink and the mouth patch are drawn at the set's layout.
+inline void RenderFrame(const Frame& frame, uint32_t* pixels, const SpriteSet& sprites) {
     std::memset(pixels, 0, sizeof(uint32_t) * kSpriteWidth * kSpriteHeight);
-    const uint8_t* to = kFrames[frame.mood];
-    const uint8_t* from = kFrames[frame.mood_from];
-    const uint8_t* hold = kFrames[frame.mood_hold];
+    const AvatarLayout& L = sprites.layout;
+    const uint32_t* palette = sprites.palette;
+    const uint8_t* to = sprites.frame(frame.mood);
+    const uint8_t* from = sprites.frame(frame.mood_from);
+    const uint8_t* hold = sprites.frame(frame.mood_hold);
+    const int eye_bottom = L.eye_top + L.eye_rows;      // exclusive
+    constexpr int lid_closed = 6;                        // hidden pupil rows that mean "closed"
+    const int closed_row = L.eye_top + L.eye_rows / 2;  // the closed eye's 2-row line starts here
     const bool blending = frame.blend < 1.f;
     const bool holding = blending && frame.hold_blend > 0.f;
     const float scale = 1.f - kSpeakSquash * (frame.squash < 0.f ? 0.f : frame.squash > 1.f ? 1.f : frame.squash);
@@ -200,33 +197,35 @@ inline void RenderFrame(const Frame& frame, uint32_t* pixels) {
         }
         for (int x = 0; x < kFrameSize; ++x) {
             const int i = sy * kFrameSize + x;
-            uint32_t color = kPalette[to[i]];
+            uint32_t color = palette[to[i]];
             if (blending) {
-                uint32_t source = kPalette[from[i]];
+                uint32_t source = palette[from[i]];
                 if (holding)
-                    source = LerpColor(source, kPalette[hold[i]], frame.hold_blend);
+                    source = LerpColor(source, palette[hold[i]], frame.hold_blend);
                 color = LerpColor(source, color, frame.blend);
             }
-            if (frame.blink && sy >= 32 && sy <= 38 && ((x >= 22 && x < 28) || (x >= 38 && x < 44))) {
-                color = (sy == 36 || sy == 37) ? 0xff343f35 : 0xfffff0d5;
-            } else if (!blending && EyePupils(frame.mood) && sy >= kBrowRow && sy < kEyeTop + kEyeRows) {
+            if (frame.blink && sy >= L.eye_top && sy < eye_bottom - 1 &&
+                ((x >= L.left_eye_x && x < L.left_eye_x + 6) || (x >= L.right_eye_x && x < L.right_eye_x + 6))) {
+                // Closed eye: the sprite's blink line two rows above the eye box bottom.
+                color = (sy == closed_row || sy == closed_row + 1) ? sprites.ink : sprites.face;
+            } else if (!blending && EyePupils(frame.mood) && sy >= L.brow_row && sy < eye_bottom) {
                 const uint8_t eyes = EyePupils(frame.mood);
                 for (int eye = 0; eye < 2; ++eye) {
                     if (!(eyes & (1 << eye)))
                         continue;
-                    const int x0 = eye == 0 ? kLeftEyeX : kRightEyeX;
+                    const int x0 = eye == 0 ? L.left_eye_x : L.right_eye_x;
                     if (x < x0 - 1 || x >= x0 + 7)
                         continue;
-                    // Row 39 is shared with the blush (x 16..21 and 43..48): only the five
-                    // inner columns of the eye box may be repainted there.
-                    if (sy == kEyeTop + kEyeRows - 1 && (x < x0 || x > x0 + 4))
+                    // The eye box's last row is shared with the blush: only the five inner
+                    // columns may be repainted there.
+                    if (sy == eye_bottom - 1 && (x < x0 || x > x0 + 4))
                         continue;
-                    if (sy < kEyeTop && (x == x0 - 1 || x == x0 + 6))
+                    if (sy < L.eye_top && (x == x0 - 1 || x == x0 + 6))
                         continue;  // brow rows stay 6 wide
-                    color = 0xfffff0d5;  // cream: erase the eye and brow drawn in the sprite
-                    // --- brows (rows 30..31). "Inner" is the side toward the nose. ---
-                    if (sy < kEyeTop) {
-                        const int row = sy - kBrowRow;  // 0 or 1
+                    color = sprites.face;  // erase the eye and brow drawn in the sprite
+                    // --- brows (the rows above the eye box). "Inner" is the side toward the nose. ---
+                    if (sy < L.eye_top) {
+                        const int row = sy == L.brow_row ? 0 : 1;
                         const bool inner_half = eye == 0 ? x >= x0 + 3 : x < x0 + 3;
                         bool dark = false;
                         if (frame.brows == 1)       // angry: inner end low, outer end high
@@ -236,49 +235,55 @@ inline void RenderFrame(const Frame& frame, uint32_t* pixels) {
                         else if (frame.brows == 3 && eye == 0)  // confused: left brow raised flat
                             dark = row == 0;
                         if (dark)
-                            color = 0xff343f35;
+                            color = sprites.ink;
                         continue;
                     }
-                    // --- lids: rows hidden from the top; 6 = closed line ---
+                    // --- lids: rows hidden from the top; lid_closed = closed line ---
                     float open = frame.eye_open;
-                    int hidden = static_cast<int>(std::lround((1.f - open) * 6.f));
+                    int hidden = static_cast<int>(std::lround((1.f - open) * lid_closed));
                     if (eye == 1)
                         hidden += frame.right_lid_extra;
-                    if (hidden > 6)
-                        hidden = 6;
-                    if (hidden >= 6) {
-                        if ((sy == 36 || sy == 37) && x >= x0 && x < x0 + 6)
-                            color = 0xff343f35;  // closed eye: the sprite's blink line
+                    if (hidden > lid_closed)
+                        hidden = lid_closed;
+                    if (hidden >= lid_closed) {
+                        if ((sy == closed_row || sy == closed_row + 1) && x >= x0 && x < x0 + 6)
+                            color = sprites.ink;  // closed eye: the sprite's blink line
                         continue;
                     }
-                    const int pw = frame.pupil_size == 0 ? 2 : frame.pupil_size == 2 ? 4 : 3;
-                    const int ph = frame.pupil_size == 0 ? 4 : 6;
-                    const int px = x0 + 1 + frame.pupil_x - (pw == 4 ? 1 : 0) + (pw == 2 ? 0 : 0);
-                    const int py = kEyeTop + 1 + frame.pupil_y + (ph == 4 ? 1 : 0);
-                    const int lid_row = kEyeTop + 1 + frame.pupil_y + hidden;  // first visible pupil row
+                    // Pupil size: the frame's 0 small / 1 normal / 2 big, shifted by the set's style.
+                    int size = frame.pupil_size + (L.pupil_style - 1);
+                    size = size < 0 ? 0 : size > 2 ? 2 : size;
+                    const int pw = size == 0 ? 2 : size == 2 ? 4 : 3;
+                    const int ph = size == 0 ? 4 : 6;
+                    const int px = x0 + 1 + frame.pupil_x - (pw == 4 ? 1 : 0);
+                    const int py = L.eye_top + 1 + frame.pupil_y + (ph == 4 ? 1 : 0);
+                    const int lid_row = L.eye_top + 1 + frame.pupil_y + hidden;  // first visible pupil row
                     if (hidden > 0 && sy == lid_row - 1 && x >= x0 && x < x0 + 6) {
-                        color = 0xff343f35;  // lid edge
+                        color = sprites.ink;  // lid edge
                         continue;
                     }
                     if (x >= px && x < px + pw && sy >= py && sy < py + ph && sy >= lid_row) {
-                        color = 0xff343f35;
+                        color = sprites.ink;
                         if (frame.highlight && x == px && sy < py + 2)
-                            color = 0xffffffff;
+                            color = sprites.highlight;
                         if (frame.highlight && pw == 4 && x == px + 1 && sy < py + 2)
-                            color = 0xffffffff;
+                            color = sprites.highlight;
                     }
                 }
             }
-            if (frame.mouth > 0 && sy >= kMouthY && sy < kMouthY + kMouthH && x >= kMouthX && x < kMouthX + kMouthW) {
-                const uint8_t index = kMouthOverlays[frame.mouth > 1 ? 1 : 0][(sy - kMouthY) * kMouthW + (x - kMouthX)];
+            if (frame.mouth > 0 && sy >= L.mouth_y && sy < L.mouth_y + L.mouth_h && x >= L.mouth_x && x < L.mouth_x + L.mouth_w) {
+                const uint8_t index = sprites.mouth[frame.mouth > 1 ? 1 : 0][(sy - L.mouth_y) * L.mouth_w + (x - L.mouth_x)];
                 if (index != 0)
-                    color = kPalette[index];
+                    color = palette[index];
             }
-            const int dest_x = x + (kSpriteWidth - kFrameSize) / 2 + (sy < kEarRows ? frame.ear_shift : 0);
+            const int dest_x = x + (kSpriteWidth - kFrameSize) / 2 + (sy < L.ear_rows ? frame.ear_shift : 0);
             pixels[y * kSpriteWidth + dest_x] = color;
         }
     }
 }
+
+// The builtin rabbit (xiaole_sprites.h).
+inline void RenderFrame(const Frame& frame, uint32_t* pixels) { RenderFrame(frame, pixels, BuiltinSprites()); }
 
 // ---------------------------------------------------------------------------
 // Expression engine, after groki-bot's avatar (ExpressionController + FaceAnimator):

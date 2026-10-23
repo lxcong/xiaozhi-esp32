@@ -18,6 +18,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 #include <atomic>
+#include <esp_heap_caps.h>
 #include <esp_lcd_panel_vendor.h>
 #include <esp_log.h>
 #include <esp_timer.h>
@@ -476,6 +477,157 @@ private:
                                cJSON_AddStringToObject(json, "name", name.c_str());
                                cJSON_AddStringToObject(json, "wake_word", wake.c_str());
                                cJSON_AddStringToObject(json, "wake_pinyin", pinyin.c_str());
+                               return json;
+                           });
+    }
+
+    // The avatar (sprite set) drawn on the screen: the builtin rabbit or an avatar pack
+    // from the assets partition. The gateway's design_avatar tool builds a new assets
+    // image and calls self.avatar.update(url): the same two steps as the user-only
+    // self.assets.set_download_url + self.reboot (which tools/list hides from the
+    // gateway), so the device downloads and applies the image at the next boot.
+    void InitializeAvatarTools(McpServer& mcp_server) {
+        mcp_server.AddTool("self.avatar.get",
+                           "Get the avatar the device keeps (`source` builtin or pack, `id`, `name`) and, "
+                           "while a preview is shown, the previewed pack's `preview_id`.",
+                           PropertyList(), [this](const PropertyList&) -> ReturnValue {
+                               const auto& live = display_->live_sprites();
+                               cJSON* json = cJSON_CreateObject();
+                               cJSON_AddStringToObject(json, "source", live.builtin ? "builtin" : "pack");
+                               cJSON_AddStringToObject(json, "id", live.id);
+                               cJSON_AddStringToObject(json, "name", live.name);
+                               cJSON_AddNumberToObject(json, "colors", live.palette_count);
+                               cJSON_AddBoolToObject(json, "preview", display_->previewing());
+                               if (display_->previewing())
+                                   cJSON_AddStringToObject(json, "preview_id", display_->sprites().id);
+                               return json;
+                           });
+        // Live preview: download a pack (~86 KB) into RAM and draw it at once, without
+        // touching the assets partition. The display reverts on preview_end, when the
+        // conversation has ended, or after ten minutes.
+        mcp_server.AddTool("self.avatar.preview",
+                           "Show a candidate avatar pack from `url` on the screen right away, animated "
+                           "like the real one, without installing it. The previous look comes back "
+                           "with self.avatar.preview_end or when the conversation ends.",
+                           PropertyList({Property("url", kPropertyTypeString)}),
+                           [this](const PropertyList& properties) -> ReturnValue {
+                               const auto url = properties["url"].value<std::string>();
+                               auto fail = [](const std::string& why) -> ReturnValue {
+                                   ESP_LOGW(TAG, "avatar preview: %s", why.c_str());
+                                   return "failed: " + why;
+                               };
+                               // Free the buffer of a preview still on screen first: the general PSRAM
+                               // heap is ~120 KB once audio and Wi-Fi run, not room for two packs.
+                               display_->EndAvatarPreview();
+                               // The gateway has answered 200 while the device saw the connection
+                               // close before the body (seen on the 2nd and 3rd preview of a call),
+                               // so each attempt uses a fresh client and the download is retried.
+                               constexpr size_t kMaxPack = 512 * 1024;
+                               constexpr int kAttempts = 3;
+                               uint8_t* data = nullptr;
+                               size_t length = 0;
+                               std::string last_error;
+                               for (int attempt = 1; attempt <= kAttempts && data == nullptr; ++attempt) {
+                                   auto http = Board::GetInstance().GetNetwork()->CreateHttp(0);
+                                   if (auto opened = http->Open("GET", url); !opened) {
+                                       last_error = "cannot open " + url + " (" + opened.error().ToString() + ")";
+                                       continue;
+                                   }
+                                   auto status = http->GetStatusCode();
+                                   if (!status || *status != 200) {
+                                       http->Close();
+                                       last_error = std::string("http status ") + (status ? std::to_string(*status) : "?");
+                                       continue;
+                                   }
+                                   length = http->GetBodyLength();
+                                   if (length < 64 || length > kMaxPack) {
+                                       http->Close();
+                                       return fail("unexpected pack size " + std::to_string(length));
+                                   }
+                                   auto* buffer = static_cast<uint8_t*>(heap_caps_malloc(length, MALLOC_CAP_SPIRAM));
+                                   if (!buffer)
+                                       buffer = static_cast<uint8_t*>(heap_caps_malloc(length, MALLOC_CAP_8BIT));
+                                   if (!buffer) {
+                                       http->Close();
+                                       return fail("no memory for the pack (PSRAM free " +
+                                                   std::to_string(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024) + " KB, largest " +
+                                                   std::to_string(heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM) / 1024) + " KB)");
+                                   }
+                                   size_t total = 0;
+                                   while (total < length) {
+                                       auto ret = http->Read(reinterpret_cast<char*>(buffer) + total, length - total);
+                                       if (!ret || *ret == 0)
+                                           break;
+                                       total += *ret;
+                                   }
+                                   http->Close();
+                                   if (total != length) {
+                                       heap_caps_free(buffer);
+                                       last_error = "short read " + std::to_string(total) + "/" + std::to_string(length) +
+                                                    " (attempt " + std::to_string(attempt) + ")";
+                                       ESP_LOGW(TAG, "avatar preview: %s", last_error.c_str());
+                                       vTaskDelay(pdMS_TO_TICKS(150 * attempt));
+                                       continue;
+                                   }
+                                   data = buffer;
+                               }
+                               if (data == nullptr) {
+                                   return fail(last_error.empty() ? "download failed" : last_error);
+                               }
+                               std::string error;
+                               if (!display_->PreviewAvatarPack(data, length, &error)) {
+                                   return fail(error);
+                               }
+                               cJSON* json = cJSON_CreateObject();
+                               cJSON_AddBoolToObject(json, "ok", true);
+                               cJSON_AddStringToObject(json, "preview_id", display_->sprites().id);
+                               cJSON_AddStringToObject(json, "name", display_->sprites().name);
+                               return json;
+                           });
+        mcp_server.AddTool("self.avatar.preview_end", "Stop the avatar preview and show the installed look again.",
+                           PropertyList(), [this](const PropertyList&) -> ReturnValue {
+                               display_->EndAvatarPreview();
+                               return true;
+                           });
+        mcp_server.AddTool("self.avatar.update",
+                           "Download a new assets image (speech models + avatar pack) from `url` and "
+                           "reboot into it. The device shows the new avatar after the reboot; the name "
+                           "and wake word are kept.",
+                           PropertyList({Property("url", kPropertyTypeString)}),
+                           [this](const PropertyList& properties) -> ReturnValue {
+                               const auto url = properties["url"].value<std::string>();
+                               if (url.rfind("http://", 0) != 0 && url.rfind("https://", 0) != 0) {
+                                   return std::string("failed: url must start with http:// or https://");
+                               }
+                               {
+                                   Settings settings("assets", true);
+                                   settings.SetString("download_url", url);
+                               }
+                               ESP_LOGI(TAG, "Avatar update scheduled from %s", url.c_str());
+                               display_->SetChatMessage("assistant", "我去换新样子啦，马上回来");
+                               // The tool reply is sent from the main loop after this callback
+                               // returns (SendMcpMessage schedules it), so the reboot must not be
+                               // queued on that loop ahead of it: a one-shot timer schedules it
+                               // 1.5 s later, after the reply has left.
+                               static esp_timer_handle_t reboot_timer = nullptr;
+                               if (reboot_timer == nullptr) {
+                                   const esp_timer_create_args_t args = {
+                                       .callback = [](void*) {
+                                           auto& app = Application::GetInstance();
+                                           app.Schedule([&app]() { app.Reboot(); });
+                                       },
+                                       .arg = nullptr,
+                                       .dispatch_method = ESP_TIMER_TASK,
+                                       .name = "avatar_reboot",
+                                       .skip_unhandled_events = true,
+                                   };
+                                   ESP_ERROR_CHECK(esp_timer_create(&args, &reboot_timer));
+                               }
+                               esp_timer_stop(reboot_timer);
+                               ESP_ERROR_CHECK(esp_timer_start_once(reboot_timer, 1500 * 1000));
+                               cJSON* json = cJSON_CreateObject();
+                               cJSON_AddBoolToObject(json, "ok", true);
+                               cJSON_AddStringToObject(json, "url", url.c_str());
                                return json;
                            });
     }

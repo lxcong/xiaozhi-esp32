@@ -59,6 +59,14 @@ public:
     virtual bool IsMonochrome() const { return false; }
     virtual bool SupportsGuiOperations() const { return false; }
     virtual void SetHideSubtitle(bool hide) { (void)hide; }
+    // An avatar pack from the assets partition (index.json "avatar_pack"); data stays
+    // mapped until the next call. nullptr returns to the builtin avatar. Boards without
+    // a drawn avatar ignore it.
+    virtual bool SetAvatarPack(const void* data, size_t size) {
+        (void)data;
+        (void)size;
+        return false;
+    }
     virtual bool InsertAnimDialog(const char* name, uint32_t duration_ms) {
         (void)name;
         (void)duration_ms;

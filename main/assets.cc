@@ -365,6 +365,17 @@ bool Assets::LvglStrategy::Apply(Assets* assets, bool refresh_display_theme) {
         display->SetEmojiCollection(custom_emoji_collection);
     }
 
+    cJSON* avatar_pack = cJSON_GetObjectItem(root.get(), "avatar_pack");
+    if (cJSON_IsString(avatar_pack)) {
+        if (!assets->GetAssetData(avatar_pack->valuestring, ptr, size)) {
+            ESP_LOGE(TAG, "The avatar pack %s is not found", avatar_pack->valuestring);
+        } else if (!display->SetAvatarPack(ptr, size)) {
+            ESP_LOGW(TAG, "The avatar pack %s was not accepted by the display", avatar_pack->valuestring);
+        } else {
+            ESP_LOGI(TAG, "Avatar pack %s applied (%u bytes)", avatar_pack->valuestring, (unsigned)size);
+        }
+    }
+
     cJSON* skin = cJSON_GetObjectItem(root.get(), "skin");
     if (cJSON_IsObject(skin)) {
         cJSON* light_skin = cJSON_GetObjectItem(skin, "light");
@@ -546,7 +557,11 @@ bool Assets::Download(std::string url,
         return false;
     }
 
-    // Unapply the partition
+    // Unapply the partition. A display drawing an avatar pack out of the mapping must
+    // let go of it first.
+    if (auto display = Board::GetInstance().GetDisplay(); display != nullptr) {
+        display->SetAvatarPack(nullptr, 0);
+    }
     UnApplyPartition();
 
     size_t sectors_to_erase = (content_length + SECTOR_SIZE - 1) / SECTOR_SIZE;
